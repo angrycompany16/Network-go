@@ -1,11 +1,12 @@
 package bcast
 
 import (
-	"Network-go/network/conn"
 	"encoding/json"
 	"fmt"
 	"net"
 	"reflect"
+
+	"github.com/angrycompany16/Network-go/network/conn"
 )
 
 const bufSize = 1024
