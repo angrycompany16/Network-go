@@ -8,6 +8,8 @@ import (
 	"syscall"
 )
 
+// TODO: Do something about the EOF stuff that gets returned whenever a peer has disconnected but not
+// 		 yet timed out
 // TODO: Make constructors for sender and listener
 
 type P2PSender struct {
