@@ -8,33 +8,6 @@ import (
 	"syscall"
 )
 
-// p2pConnection:
-// - has channels for receive, send and quit
-// - channels can be set up with arbitrary addresses and ports
-
-// ConnectionSender(addr, chan)
-
-// ConnectionReceiver(addr, port, chan)
-
-// go both of these on init()
-
-// KillConnection()
-// Sends a message into the quit channel
-
-// Idea:
-// Methods:
-// - ConnectionSender
-// - ConnectionListener
-// - KillConnection
-
-// Restructuring: split into sender and listener
-
-// Idea: Utilize UDP to see whether a peer is ready for connection
-
-// Flow:
-// New peer added -> Set up listener for that peer -> Broadcast that listener is ready
-// -> Connect sender to peer as soon as peer broadcasts ready
-
 // TODO: Make constructors for sender and listener
 
 type P2PSender struct {
@@ -46,8 +19,7 @@ type P2PSender struct {
 }
 
 type P2PListener struct {
-	QuitChan chan int
-	// Ready     bool
+	QuitChan  chan int
 	Addr      net.TCPAddr
 	ReadyChan chan int
 }
@@ -86,6 +58,7 @@ func (p *P2PSender) Send() {
 }
 
 func (p *P2PListener) Listen() error {
+	// We might not need this actually
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
@@ -101,7 +74,7 @@ func (p *P2PListener) Listen() error {
 			})
 		},
 	}
-
+	// TODO: This should be the normal mode of operation. Make this the default
 	// If a port fails, simply try again with a new port
 	var listener net.Listener
 	var err error
@@ -122,6 +95,7 @@ func (p *P2PListener) Listen() error {
 	p.ReadyChan <- 1
 	// p.Ready = true
 
+	// TODO: Turn this into a for loop in case things go wrong
 	conn, err := listener.Accept()
 	if err != nil {
 		fmt.Println("Error when connecting listener over TCP")
@@ -153,127 +127,115 @@ func (p *P2PListener) Listen() error {
 	}
 }
 
-// Should not really need the listenAddr, at some point it must be replaced by
-// port 0, but idk how to make it work :^)
-// func NewConnection(hostSendAddr *net.TCPAddr, hostListenAddr *net.TCPAddr, peerListenAddr *net.TCPAddr) *P2PConnection {
-// 	fmt.Println("-------------------------------------------")
-// 	fmt.Printf("Setting up new TCP connection between %s and %s", hostSendAddr.String(), peerListenAddr.String())
-// 	fmt.Println("-------------------------------------------")
-// 	return &P2PConnection{
-// 		DataChan:       make(chan int),
-// 		QuitChan:       make(chan int),
-// 		ReadyChan:      make(chan int),
-// 		hostListenAddr: hostListenAddr,
-// 		hostSendAddr:   hostSendAddr,
-// 		peerListenAddr: peerListenAddr,
-// 	}
-// }
-
-type P2PConnection struct {
-	DataChan       chan int
-	QuitChan       chan int
-	ReadyChan      chan int
-	hostSendAddr   *net.TCPAddr
-	hostListenAddr *net.TCPAddr
-	peerListenAddr *net.TCPAddr
-}
+/*
+	type P2PConnection struct {
+		DataChan       chan int
+		QuitChan       chan int
+		ReadyChan      chan int
+		hostSendAddr   *net.TCPAddr
+		hostListenAddr *net.TCPAddr
+		peerListenAddr *net.TCPAddr
+	}
 
 // Send data to the peer
-func (p *P2PConnection) Send() {
-	conn, err := net.DialTCP("tcp4", p.hostSendAddr, p.peerListenAddr)
-	if err != nil {
-		fmt.Println("Error when connecting via TCP")
-		fmt.Println(err)
-		return
-	}
-	defer conn.Close()
 
-	fmt.Println("---- CONNECTIONG INITIALIZED SENDER SIDE ----")
-	p.ReadyChan <- 1
-
-	for {
-		select {
-		case <-p.QuitChan:
-			fmt.Println("Closing Send connection...")
-			// Close the connection peacefully and stop the goroutine
+	func (p *P2PConnection) Send() {
+		conn, err := net.DialTCP("tcp4", p.hostSendAddr, p.peerListenAddr)
+		if err != nil {
+			fmt.Println("Error when connecting via TCP")
+			fmt.Println(err)
 			return
-		case <-p.DataChan:
-			fmt.Println("Sending data to port ", p.peerListenAddr.Port)
+		}
+		defer conn.Close()
 
-			_, err := conn.Write([]byte("Test message. Did i arrive?\n"))
-			if err != nil {
-				fmt.Println("Could not send TCP data")
-				fmt.Println(err)
-				continue
+		fmt.Println("---- CONNECTIONG INITIALIZED SENDER SIDE ----")
+		p.ReadyChan <- 1
+
+		for {
+			select {
+			case <-p.QuitChan:
+				fmt.Println("Closing Send connection...")
+				// Close the connection peacefully and stop the goroutine
+				return
+			case <-p.DataChan:
+				fmt.Println("Sending data to port ", p.peerListenAddr.Port)
+
+				_, err := conn.Write([]byte("Test message. Did i arrive?\n"))
+				if err != nil {
+					fmt.Println("Could not send TCP data")
+					fmt.Println(err)
+					continue
+				}
 			}
 		}
 	}
-}
 
 // Listen to what the peer sends back
-func (p *P2PConnection) Recv() error {
-	// addr := net.TCPAddr{
-	// 	IP: p.peerAddr.IP,
-	// }
-	listener, err := net.ListenTCP("tcp4", p.hostListenAddr)
-	if err != nil {
-		fmt.Println("Error when setting up listener over TCP")
-		fmt.Println(err)
-		return err
-	}
-	defer listener.Close()
-	fmt.Println("Listening on port", p.hostListenAddr.Port)
-	p.ReadyChan <- 1
 
-	conn, err := listener.Accept()
-	if err != nil {
-		fmt.Println("Error when connecting listener over TCP")
-		fmt.Println(err)
-		return err
-	}
+	func (p *P2PConnection) Recv() error {
+		// addr := net.TCPAddr{
+		// 	IP: p.peerAddr.IP,
+		// }
+		listener, err := net.ListenTCP("tcp4", p.hostListenAddr)
+		if err != nil {
+			fmt.Println("Error when setting up listener over TCP")
+			fmt.Println(err)
+			return err
+		}
+		defer listener.Close()
+		fmt.Println("Listening on port", p.hostListenAddr.Port)
+		p.ReadyChan <- 1
 
-	fmt.Println("---- CONNECTION INITIALIZED LISTENER SIDE ----")
-	p.ReadyChan <- 1
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Println("Error when connecting listener over TCP")
+			fmt.Println(err)
+			return err
+		}
 
-	buffer := make([]byte, 1024)
+		fmt.Println("---- CONNECTION INITIALIZED LISTENER SIDE ----")
+		p.ReadyChan <- 1
 
-	for {
-		select {
-		case <-p.QuitChan:
-			// Graceful shutdown
-			fmt.Println("Closing Receive connection...")
-			return nil
-		default:
-			n, err := conn.Read(buffer)
-			// data, err := bufio.NewReader(conn).ReadString('\n')
-			if err != nil {
-				fmt.Println("Encountered error when reading data: ")
-				fmt.Println(err)
-				continue
+		buffer := make([]byte, 1024)
+
+		for {
+			select {
+			case <-p.QuitChan:
+				// Graceful shutdown
+				fmt.Println("Closing Receive connection...")
+				return nil
+			default:
+				n, err := conn.Read(buffer)
+				// data, err := bufio.NewReader(conn).ReadString('\n')
+				if err != nil {
+					fmt.Println("Encountered error when reading data: ")
+					fmt.Println(err)
+					continue
+				}
+				// Send into channl
+				fmt.Println("Received data: ")
+				fmt.Println(string(buffer[:n]))
 			}
-			// Send into channl
-			fmt.Println("Received data: ")
-			fmt.Println(string(buffer[:n]))
 		}
 	}
-}
 
 // Should not really need the listenAddr, at some point it must be replaced by
 // port 0, but idk how to make it work :^)
-func NewConnection(hostSendAddr *net.TCPAddr, hostListenAddr *net.TCPAddr, peerListenAddr *net.TCPAddr) *P2PConnection {
-	fmt.Println("-------------------------------------------")
-	fmt.Printf("Setting up new TCP connection between %s and %s", hostSendAddr.String(), peerListenAddr.String())
-	fmt.Println("-------------------------------------------")
-	return &P2PConnection{
-		DataChan:       make(chan int),
-		QuitChan:       make(chan int),
-		ReadyChan:      make(chan int),
-		hostListenAddr: hostListenAddr,
-		hostSendAddr:   hostSendAddr,
-		peerListenAddr: peerListenAddr,
-	}
-}
 
+	func NewConnection(hostSendAddr *net.TCPAddr, hostListenAddr *net.TCPAddr, peerListenAddr *net.TCPAddr) *P2PConnection {
+		fmt.Println("-------------------------------------------")
+		fmt.Printf("Setting up new TCP connection between %s and %s", hostSendAddr.String(), peerListenAddr.String())
+		fmt.Println("-------------------------------------------")
+		return &P2PConnection{
+			DataChan:       make(chan int),
+			QuitChan:       make(chan int),
+			ReadyChan:      make(chan int),
+			hostListenAddr: hostListenAddr,
+			hostSendAddr:   hostSendAddr,
+			peerListenAddr: peerListenAddr,
+		}
+	}
+*/
 func GetAvailablePort() (int, error) {
 	addr, err := net.ResolveTCPAddr("tcp4", "localhost:0")
 	if err != nil {

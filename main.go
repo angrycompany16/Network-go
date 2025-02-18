@@ -45,7 +45,7 @@ type elevator struct {
 	// Minor change: Instead of setting these via parameters, set them programmatically at the start
 	// and then broadcast a new port whenever we have successfully made a new connection
 	// How to ensure (if two peers connect at the same time) that they don't try to connect at the same port?
-	SendAddr   net.TCPAddr // Main address, used *only* for sending data
+	SendAddr   net.TCPAddr // Main address, used *only* for sending data (no, that's just not what it is)
 	ListenAddr net.TCPAddr
 	peers      []*peer
 	peersLock  *sync.Mutex
@@ -55,8 +55,6 @@ type P2PConnection struct {
 }
 
 // Any other elevator
-// Initial idea: maintain a channel for each peer
-// How to close channels automatically
 type peer struct {
 	Sender   transfer.P2PSender
 	Listener transfer.P2PListener
@@ -72,8 +70,6 @@ type ElevatorState struct {
 	Busy             bool
 }
 
-// IDEA: Skip the whole broadcasting ports thing and simply let the Connections manage their own port
-// If it chooses a port that is already taken, just try a new one. Then it should work sooner or later :D:DD
 // I am sane
 
 func main() {
@@ -121,7 +117,6 @@ func main() {
 		// Note: In an unbuffered channel, passing a value is blocking.
 		// Therefore it is important to always have something listening to that channel,
 		// as that will unblock the value pass
-
 		elevator.peersLock.Lock()
 		if char == 'C' || char == 'c' {
 			if len(elevator.peers) == 0 {
@@ -148,6 +143,7 @@ func (e *elevator) timeout() {
 		for i, peer := range e.peers {
 			if peer.lastSeen.Add(timeout).Before(time.Now()) {
 				fmt.Printf("\nRemove peer: \n%#v\n", peer)
+				// TODO: make this work. Should be a small feat.
 				// Close the connnection
 				// Make sure to only use this when TCP is fully implemented
 				// peer.Sender.QuitChan <- 1
@@ -177,6 +173,9 @@ func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 	}
 }
 
+// TODO: Fix all the todos and also make this a bit more separated so it's actually possible to understand
+//
+//	what this does
 func (e *elevator) readLifeSignals(signalChan chan (LifeSignal)) {
 LifeSignals:
 	for lifeSignal := range signalChan {
@@ -195,7 +194,7 @@ LifeSignals:
 				if connectionState == Listening && ok && e.state.ConnectionStates[_peer.id] == Listening {
 					// We can safely set the ports again because we know that both sides of the connection
 					// have entered the listening state and thus established all port values
-
+					// (This just kind of doesn't matter with the new / better port usage)
 					newSendPort, err := transfer.GetAvailablePort()
 					// TODO: fix
 					if err != nil {
@@ -313,14 +312,6 @@ func initElevator() elevator {
 	fmt.Println(sendPort)
 	fmt.Println(listenPort)
 
-	// port, err := strconv.Atoi(dataPort)
-	// if err != nil {
-	// 	fmt.Print("Could not convert port flag value ", port)
-	// 	fmt.Println(" to int. Warning: Choosing port randomly.")
-	// 	port = rand.IntN(65535)
-	// 	fmt.Println("Chose port ", port)
-	// }
-
 	ip, err := localip.LocalIP()
 	if err != nil {
 		log.Fatal("Could not get local IP adress")
@@ -348,6 +339,8 @@ func initElevator() elevator {
 		peersLock: &sync.Mutex{},
 	}
 
+	// TODO: Improve the debugging / printing information
+	// Use some kind of custom struct print() implementation idk how but it's probably possible
 	// fmt.Printf("Successfully created new elevator:\n%#v\n", elevator)
 
 	return elevator
