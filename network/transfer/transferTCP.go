@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"syscall"
 )
 
 // TODO: Do something about the EOF stuff that gets returned whenever a peer has disconnected but not
@@ -78,21 +79,21 @@ func (p *P2PListener) Listen() error {
 	}
 
 	// // We might not need this actually
-	// lc := net.ListenConfig{
-	// 	Control: func(network, address string, c syscall.RawConn) error {
-	// 		return c.Control(func(fd uintptr) {
-	// 			err := syscall.SetsockoptInt(
-	// 				int(fd),
-	// 				syscall.SOL_SOCKET,
-	// 				syscall.SO_REUSEADDR,
-	// 				1,
-	// 			)
-	// 			if err != nil {
-	// 				fmt.Printf("Failed to set SO_REUSEADDR: %v", err)
-	// 			}
-	// 		})
-	// 	},
-	// }
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				err := syscall.SetsockoptInt(
+					int(fd),
+					syscall.SOL_SOCKET,
+					syscall.SO_REUSEADDR,
+					1,
+				)
+				if err != nil {
+					fmt.Printf("Failed to set SO_REUSEADDR: %v", err)
+				}
+			})
+		},
+	}
 	// // TODO: This should be the normal mode of operation. Make this the default
 	// // If a port fails, simply try again with a new port
 	// var listener net.Listener
