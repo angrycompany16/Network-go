@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 
@@ -41,14 +40,17 @@ type LifeSignal struct {
 
 type elevator struct {
 	id    string
+	name  string // For debugging purposes
 	state ElevatorState
-	// Minor change: Instead of setting these via parameters, set them programmatically at the start
-	// and then broadcast a new port whenever we have successfully made a new connection
-	// How to ensure (if two peers connect at the same time) that they don't try to connect at the same port?
-	SendAddr   net.TCPAddr // Main address, used *only* for sending data (no, that's just not what it is)
-	ListenAddr net.TCPAddr
-	peers      []*peer
-	peersLock  *sync.Mutex
+	// Remove
+	ip         net.IP
+	ListenAddr net.TCPAddr // Broadcasted address used for telling the
+	// other peers which port they should send to
+
+	// Main address, used *only* for sending data (no, that's just not what it is)
+	// ListenAddr net.TCPAddr
+	peers     []*peer
+	peersLock *sync.Mutex
 }
 
 type P2PConnection struct {
@@ -66,7 +68,6 @@ type peer struct {
 type ElevatorState struct {
 	ConnectionStates map[string]ConnectionState
 	Foo              int
-	Name             string
 	Busy             bool
 }
 
@@ -174,8 +175,8 @@ func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 }
 
 // TODO: Fix all the todos and also make this a bit more separated so it's actually possible to understand
-//
-//	what this does
+
+// what this does
 func (e *elevator) readLifeSignals(signalChan chan (LifeSignal)) {
 LifeSignals:
 	for lifeSignal := range signalChan {
@@ -195,28 +196,29 @@ LifeSignals:
 					// We can safely set the ports again because we know that both sides of the connection
 					// have entered the listening state and thus established all port values
 					// (This just kind of doesn't matter with the new / better port usage)
-					newSendPort, err := transfer.GetAvailablePort()
-					// TODO: fix
-					if err != nil {
-						log.Fatal(err)
-					}
-					e.SendAddr.Port = newSendPort
 
-					fmt.Println("New send port:")
-					fmt.Println(newSendPort)
+					// newSendPort, err := transfer.GetAvailablePort()
+					// // TODO: fix
+					// if err != nil {
+					// 	log.Fatal(err)
+					// }
+					// e.SendAddr.Port = newSendPort
 
-					newListenPort, err := transfer.GetAvailablePort()
-					// TODO: fix
-					if err != nil {
-						log.Fatal(err)
-					}
-					e.ListenAddr.Port = newListenPort
+					// fmt.Println("New send port:")
+					// fmt.Println(newSendPort)
 
-					fmt.Println("New listening port")
-					fmt.Println(newListenPort)
+					// newListenPort, err := transfer.GetAvailablePort()
+					// // TODO: fix
+					// if err != nil {
+					// 	log.Fatal(err)
+					// }
+					e.ListenAddr.Port = transfer.GetAvailablePort()
 
-					fmt.Println("Sender host port", _peer.Sender.HostAddr.Port)
-					fmt.Println("Sender peer port", _peer.Sender.PeerAddr.Port)
+					// fmt.Println("New listening port")
+					// fmt.Println(newListenPort)
+
+					// fmt.Println("Sender host port", _peer.Sender.HostAddr.Port)
+					// fmt.Println("Sender peer port", _peer.Sender.PeerAddr.Port)
 					// fmt.Println("Listener port", _peer.Listener.Addr.Port)
 					go _peer.Sender.Send()
 
@@ -231,41 +233,18 @@ LifeSignals:
 			}
 		}
 
-		newPeer := &peer{
-			Sender: transfer.P2PSender{
-				DataChan:  make(chan int),
-				QuitChan:  make(chan int),
-				ReadyChan: make(chan int),
-				HostAddr:  e.SendAddr,
-				PeerAddr:  lifeSignal.ListenerAddr,
+		// Initialize ports
+		sender := transfer.NewSender(
+			net.TCPAddr{
+				IP:   e.ip,
+				Port: transfer.GetAvailablePort(),
 			},
-			Listener: transfer.P2PListener{
-				QuitChan:  make(chan int),
-				ReadyChan: make(chan int),
-				Addr:      e.ListenAddr,
-			},
-			state:    lifeSignal.State,
-			id:       lifeSignal.SenderId,
-			lastSeen: time.Now(),
-		}
+			lifeSignal.ListenerAddr,
+		)
 
-		// Problem: We need to be able to switch the ports between reading two life signals
-		// to ensure that we can connect to two different nodes (if we are the 3rd guy joining the network)
-		// but we also need to ensure that it takes a sufficient amount of time so that we don't overwrite the
-		// previous
+		listener := transfer.NewListener(e.ListenAddr)
 
-		// The genious: Setting the ports one at a time
-		// We can safely set the send port without fucking up anything
-		// Fuscking shit
-		// We also need the listening port to change between calls
-		fmt.Println("----Peer ports: ----")
-		fmt.Println("Sender:")
-		fmt.Println(e.SendAddr)
-		fmt.Println(lifeSignal.ListenerAddr)
-		fmt.Println("Listener:")
-		fmt.Println(e.ListenAddr)
-		fmt.Println("-------------------")
-		// fmt.Println(lifeSignal.ListenerAddr)
+		newPeer := newPeer(sender, listener, lifeSignal.State, lifeSignal.SenderId)
 
 		go newPeer.Listener.Listen()
 		// Wait for "new peer"-listener to return that it is ready
@@ -274,43 +253,24 @@ LifeSignals:
 		e.state.ConnectionStates[newPeer.id] = Listening
 
 		e.peers = append(e.peers, newPeer)
-		fmt.Println()
-		// fmt.Printf("New peer added: \n%#v\n", newPeer)
+		fmt.Println("New peer added: ")
+		fmt.Println(newPeer)
 
 		e.peersLock.Unlock()
+
+		// TODO
+		// After adding a new peer, we need to update the port we are
+		// listening to as the one we just used will be taken
 	}
 }
 
+// Intialize program tagged with 'elevatorprogram' elns
 func initElevator() elevator {
-	var id, name, dataFlag, dataPort string
+	var id, name string
 	flag.StringVar(&id, "id", "", "id of this peer")
 	flag.StringVar(&name, "name", "", "name of this peer")
-	flag.StringVar(&dataFlag, "data", "", "data of this peer")
-	flag.StringVar(&dataPort, "port", "", "port for this peer")
 
 	flag.Parse()
-
-	data, err := strconv.Atoi(dataFlag)
-
-	if err != nil {
-		fmt.Print("Could not convert data flag value ", data)
-		fmt.Println(" to int.")
-	}
-
-	sendPort, err := transfer.GetAvailablePort()
-	// TODO: fix
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	listenPort, err := transfer.GetAvailablePort()
-	// TODO: fix
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println(sendPort)
-	fmt.Println(listenPort)
 
 	ip, err := localip.LocalIP()
 	if err != nil {
@@ -319,29 +279,67 @@ func initElevator() elevator {
 
 	IP := net.ParseIP(ip)
 
-	elevator := elevator{
-		id: id,
-		state: ElevatorState{
-			ConnectionStates: make(map[string]ConnectionState),
-			Foo:              data,
-			Name:             name,
-			Busy:             false,
-		},
-		SendAddr: net.TCPAddr{
-			IP:   IP,
-			Port: sendPort,
-		},
+	elevator := newElevator(id, name, IP, newElevatorState(0))
+
+	// TODO: Improve the debugging / printing information
+	// Use some kind of custom struct print() implementation idk how but it's probably possible
+	fmt.Println("Successfully created new elevator: ")
+	fmt.Println(elevator)
+
+	return elevator
+}
+
+func newElevator(id string, name string, ip net.IP, state ElevatorState) elevator {
+	return elevator{
+		id:    id,
+		name:  name,
+		state: state,
+		ip:    ip,
 		ListenAddr: net.TCPAddr{
-			IP:   IP,
-			Port: listenPort,
+			IP:   ip,
+			Port: transfer.GetAvailablePort(),
 		},
 		peers:     make([]*peer, 0),
 		peersLock: &sync.Mutex{},
 	}
+}
 
-	// TODO: Improve the debugging / printing information
-	// Use some kind of custom struct print() implementation idk how but it's probably possible
-	// fmt.Printf("Successfully created new elevator:\n%#v\n", elevator)
+func newElevatorState(Foo int) ElevatorState {
+	return ElevatorState{
+		ConnectionStates: make(map[string]ConnectionState),
+		Foo:              Foo,
+		Busy:             false,
+	}
+}
 
-	return elevator
+func newPeer(sender transfer.P2PSender, listener transfer.P2PListener, state ElevatorState, id string) *peer {
+	return &peer{
+		Sender:   sender,
+		Listener: listener,
+		state:    state,
+		id:       id,
+		lastSeen: time.Now(),
+	}
+}
+
+// Sub-optimal
+func (e elevator) String() string {
+	return fmt.Sprint(
+		fmt.Sprintf("------- Elevator %s----\n", e.name),
+		fmt.Sprintf(" ~ id: %s\n", e.id),
+		fmt.Sprintf(" ~ listening on: %s", &e.ListenAddr),
+	)
+}
+
+// Sub-optimal
+// TODO: improve using multiline strings
+func (p peer) String() string {
+	return fmt.Sprint(
+		fmt.Sprintf("------- Peer %s----\n", p.id),
+		fmt.Sprintf(" ~ Sender: %s\n", p.Sender),
+		fmt.Sprintf(" ~ Listener: %s", p.Listener),
+		// not very important
+		// fmt.Sprintf(" ~ State: %s\n", p.State),
+		// fmt.Sprintf(" ~ Last seen: %s\n", p.LastSeen),
+	)
 }
