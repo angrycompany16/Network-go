@@ -102,10 +102,10 @@ func main() {
 				fmt.Println("No peers!")
 			}
 
-			for i, peer := range elevator.peers {
+			for _, peer := range elevator.peers {
 				fmt.Println()
 				fmt.Println("-------------------------------")
-				fmt.Printf("Peer %d: %#v\n", i, peer)
+				fmt.Println(peer)
 				fmt.Println("-------------------------------")
 			}
 		}
@@ -176,6 +176,14 @@ func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 
 // TODO: Fix all the todos and also make this a bit more separated so it's actually possible to understand
 
+// Big problem: When we add a new node into a network which already has multiple existing nodes,
+// the added node will broadcast that it's listening on the same port to all the nodes, causing
+// them to all try to connect to the same port. This is a problem.
+
+// How to resolve?
+// - Either we can connect via UDP first and then set up all the communication channels
+// - Somehow enforce sequentiality
+
 // what this does
 func (e *elevator) readLifeSignals(signalChan chan (LifeSignal)) {
 LifeSignals:
@@ -232,6 +240,14 @@ LifeSignals:
 				continue LifeSignals
 			}
 		}
+
+		// Ensure that only one connection is initialized at a time?
+		// for k, v := range e.state.ConnectionStates {
+		// 	if v == Listening {
+		// 		fmt.Printf("connection from elevator %s to %s is in Listening state", e.id, k)
+		// 		continue LifeSignals
+		// 	}
+		// }
 
 		// Initialize ports
 		sender := transfer.NewSender(

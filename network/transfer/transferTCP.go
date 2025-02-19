@@ -60,22 +60,23 @@ func (p *P2PSender) Send() {
 // BIG problem: nothing works
 // Make it fix
 func (p *P2PListener) Listen() error {
-	var listener net.Listener
-	var err error
-	for {
-		listener, err = net.ListenTCP("tcp4", &p.Addr)
-		if err != nil {
-			// TODO: check that the error was bind: already in use
-			// Problem:
-			port := GetAvailablePort()
-			p.Addr.Port = port
-			fmt.Println("Error when setting up listener over TCP")
-			fmt.Println(err)
-			// return err
-		} else {
-			break
-		}
-	}
+	// Probably unnecessary
+	// var listener net.Listener
+	// var err error
+	// for {
+	// 	listener, err = net.ListenTCP("tcp4", &p.Addr)
+	// 	if err != nil {
+	// 		// TODO: check that the error was bind: already in use
+	// 		// Problem: This doesn't work because even though we are changing the port to a free one
+	// 		port := GetAvailablePort()
+	// 		p.Addr.Port = port
+	// 		fmt.Println("Error when setting up listener over TCP")
+	// 		fmt.Println(err)
+	// 		// return err
+	// 	} else {
+	// 		break
+	// 	}
+	// }
 
 	// // We might not need this actually
 	// lc := net.ListenConfig{
@@ -109,6 +110,14 @@ func (p *P2PListener) Listen() error {
 	// 		break
 	// 	}
 	// }
+
+	listener, err := net.ListenTCP("tcp4", &p.Addr)
+
+	if err != nil {
+		fmt.Println("Sandwich")
+		fmt.Println(err)
+	}
+
 	defer listener.Close()
 	fmt.Println("Listener ready on port", p.Addr.Port)
 	p.ReadyChan <- 1
