@@ -3,15 +3,22 @@ package transfer
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
-	"syscall"
 )
 
 // TODO: Do something about the EOF stuff that gets returned whenever a peer has disconnected but not
 // 		 yet timed out
 // TODO: Make constructors for sender and listener
 
-type P2PSender struct {
+// Probably a stupid name
+type ListenSocket struct {
+	listener  *net.TCPListener
+	Addr      net.TCPAddr
+	ReadyChan chan int
+}
+
+type Sender struct {
 	DataChan  chan int
 	QuitChan  chan int
 	ReadyChan chan int
@@ -19,14 +26,13 @@ type P2PSender struct {
 	PeerAddr  net.TCPAddr
 }
 
-type P2PListener struct {
+type Receiver struct {
+	listener  *ListenSocket
 	QuitChan  chan int
 	ReadyChan chan int
-	Addr      net.TCPAddr
 }
 
-// Send data to the peer
-func (p *P2PSender) Send() {
+func (p *Sender) Send() {
 	conn, err := net.DialTCP("tcp4", &p.HostAddr, &p.PeerAddr)
 	if err != nil {
 		fmt.Println("Error when connecting via TCP")
@@ -58,65 +64,24 @@ func (p *P2PSender) Send() {
 	}
 }
 
-// BIG problem: nothing works
-// Make it fix
-func (p *P2PListener) Listen() error {
-	var listener net.Listener
-	var err error
-	for {
-		listener, err = net.ListenTCP("tcp4", &p.Addr)
-		if err != nil {
-			// TODO: check that the error was bind: already in use
-			// Problem:
-			port := GetAvailablePort()
-			p.Addr.Port = port
-			fmt.Println("Error when setting up listener over TCP")
-			fmt.Println(err)
-			// return err
-		} else {
-			break
-		}
+func (l *ListenSocket) Listen() {
+	listener, err := net.ListenTCP("tcp4", &l.Addr)
+	if err != nil {
+		println("Listener fucked up")
+		log.Fatal(err)
 	}
 
-	// // We might not need this actually
-	lc := net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				err := syscall.SetsockoptInt(
-					int(fd),
-					syscall.SOL_SOCKET,
-					syscall.SO_REUSEADDR,
-					1,
-				)
-				if err != nil {
-					fmt.Printf("Failed to set SO_REUSEADDR: %v", err)
-				}
-			})
-		},
-	}
-	// // TODO: This should be the normal mode of operation. Make this the default
-	// // If a port fails, simply try again with a new port
-	// var listener net.Listener
-	// var err error
-	// for {
-	// 	listener, err = lc.Listen(context.Background(), "tcp4", p.Addr.String())
-	// 	if err != nil {
-	// 		port := GetAvailablePort()
-	// 		p.Addr.Port = port
-	// 		fmt.Println("Error when setting up listener over TCP")
-	// 		fmt.Println(err)
-	// 		return err
-	// 	} else {
-	// 		break
-	// 	}
-	// }
 	defer listener.Close()
-	fmt.Println("Listener ready on port", p.Addr.Port)
-	p.ReadyChan <- 1
-	// p.Ready = true
+	fmt.Println("Listener ready on port", l.Addr.Port)
+	l.listener = listener
+	l.ReadyChan <- 1
+	for {
+	}
+}
 
-	// TODO: Turn this into a for loop in case things go wrong
-	conn, err := listener.Accept()
+func (lc *Receiver) Listen() error {
+	conn, err := lc.listener.listener.Accept()
+	fmt.Println("passed?")
 	if err != nil {
 		fmt.Println("Error when connecting listener over TCP")
 		fmt.Println(err)
@@ -124,11 +89,11 @@ func (p *P2PListener) Listen() error {
 	}
 
 	fmt.Println("---- LISTENER CONNECTED ----")
-	p.ReadyChan <- 1
+	lc.ReadyChan <- 1
 
 	for {
 		select {
-		case <-p.QuitChan:
+		case <-lc.QuitChan:
 			// Graceful shutdown
 			fmt.Println("Closing Listener connection...")
 			return nil
@@ -147,23 +112,23 @@ func (p *P2PListener) Listen() error {
 	}
 }
 
-func (s P2PSender) String() string {
+func (s Sender) String() string {
 	return fmt.Sprintln(
-		"P2P sender object",
+		"P2P sender object\n",
 		fmt.Sprintf("~ host address: %s\n", &s.HostAddr),
 		fmt.Sprintf("~ peer address: %s", &s.PeerAddr),
 	)
 }
 
-func (l P2PListener) String() string {
+func (l Receiver) String() string {
 	return fmt.Sprintln(
 		"P2P listener object",
-		fmt.Sprintf("~ listening on: %s", &l.Addr),
+		fmt.Sprintf("~ listening on: %s", &l.listener.Addr),
 	)
 }
 
-func NewSender(hostAddr net.TCPAddr, peerAddr net.TCPAddr) P2PSender {
-	return P2PSender{
+func NewSender(hostAddr net.TCPAddr, peerAddr net.TCPAddr) Sender {
+	return Sender{
 		DataChan:  make(chan int),
 		QuitChan:  make(chan int),
 		ReadyChan: make(chan int),
@@ -172,11 +137,11 @@ func NewSender(hostAddr net.TCPAddr, peerAddr net.TCPAddr) P2PSender {
 	}
 }
 
-func NewListener(addr net.TCPAddr) P2PListener {
-	return P2PListener{
+func NewListenConnection(listener *ListenSocket) Receiver {
+	return Receiver{
+		listener:  listener,
 		QuitChan:  make(chan int),
 		ReadyChan: make(chan int),
-		Addr:      addr,
 	}
 }
 
