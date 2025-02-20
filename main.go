@@ -26,26 +26,29 @@ var (
 )
 
 type LifeSignal struct {
-	ListenerAddr net.TCPAddr
+	ListenerAddr net.UDPAddr // Server address
 	SenderId     string
 	State        ElevatorState   // State of this peer
 	WorldView    []ElevatorState // State of other peers
 }
 
 type elevator struct {
-	id        string
-	name      string // For debugging purposes
-	state     ElevatorState
+	id    string
+	name  string // For debugging purposes
+	state ElevatorState
+	// serverAddr net.UDPAddr
+	// clientAddr net.UDPAddr
+
 	ip        net.IP
-	listener  transfer.ListenSocket
+	listener  transfer.Listener
 	peers     []*peer
 	peersLock *sync.Mutex
 }
 
 // Any other elevator
 type peer struct {
-	Sender   transfer.Sender
-	Listener transfer.Receiver
+	Sender transfer.Sender // Used for sending data to this peer
+	// Listener transfer.Receiver
 	state    ElevatorState
 	id       string
 	lastSeen time.Time
@@ -151,7 +154,7 @@ func (e *elevator) timeout() {
 func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 	for {
 		signal := LifeSignal{
-			ListenerAddr: e.listener.Addr,
+			ListenerAddr: e,
 			SenderId:     e.id,
 			State:        e.state,
 		}
@@ -184,10 +187,10 @@ LifeSignals:
 				// TODO: handle !ok
 				if !connectionState && ok && !e.state.Connected[_peer.id] {
 					go _peer.Sender.Send()
-					go _peer.Listener.Listen()
+					// go _peer.Listener.Listen()
 
 					<-_peer.Sender.ReadyChan
-					<-_peer.Listener.ReadyChan
+					// <-_peer.Listener.ReadyChan
 					e.state.Connected[_peer.id] = true
 				}
 
@@ -198,16 +201,16 @@ LifeSignals:
 		}
 
 		sender := transfer.NewSender(
-			net.TCPAddr{
+			net.UDPAddr{
 				IP:   e.ip,
 				Port: transfer.GetAvailablePort(),
 			},
 			lifeSignal.ListenerAddr,
 		)
 
-		listener := transfer.NewListenConnection(&e.listener)
+		// listener := transfer.NewListenConnection(&e.listener)
 
-		newPeer := newPeer(sender, listener, lifeSignal.State, lifeSignal.SenderId)
+		newPeer := newPeer(sender, lifeSignal.State, lifeSignal.SenderId)
 		// it FUCKING WIRKS!!!!
 
 		e.state.Connected[newPeer.id] = false
@@ -251,9 +254,17 @@ func newElevator(id string, name string, ip net.IP, state ElevatorState) elevato
 		id:    id,
 		name:  name,
 		state: state,
-		ip:    ip,
-		listener: transfer.ListenSocket{
-			Addr: net.TCPAddr{
+		// serverAddr: net.UDPAddr{
+		// 	IP:   ip,
+		// 	Port: transfer.GetAvailablePort(),
+		// },
+		// clientAddr: net.UDPAddr{
+		// 	IP:   ip,
+		// 	Port: transfer.GetAvailablePort(),
+		// },
+		ip: ip,
+		listener: transfer.Listener{
+			Addr: net.UDPAddr{
 				IP:   ip,
 				Port: transfer.GetAvailablePort(),
 			},
@@ -272,10 +283,10 @@ func newElevatorState(Foo int) ElevatorState {
 	}
 }
 
-func newPeer(sender transfer.Sender, listener transfer.Receiver, state ElevatorState, id string) *peer {
+func newPeer(sender transfer.Sender, state ElevatorState, id string) *peer {
 	return &peer{
-		Sender:   sender,
-		Listener: listener,
+		Sender: sender,
+		// Listener: listener,
 		state:    state,
 		id:       id,
 		lastSeen: time.Now(),
@@ -285,9 +296,9 @@ func newPeer(sender transfer.Sender, listener transfer.Receiver, state ElevatorS
 // Sub-optimal
 func (e elevator) String() string {
 	return fmt.Sprint(
-		fmt.Sprintf("------- Elevator %s----\n", e.name),
-		fmt.Sprintf(" ~ id: %s\n", e.id),
-		fmt.Sprintf(" ~ listening on: %s", &e.listener.Addr),
+	// fmt.Sprintf("------- Elevator %s----\n", e.name),
+	// fmt.Sprintf(" ~ id: %s\n", e.id),
+	// fmt.Sprintf(" ~ listening on: %s", &e.listener.Addr),
 	)
 }
 
@@ -296,8 +307,8 @@ func (e elevator) String() string {
 func (p peer) String() string {
 	return fmt.Sprint(
 		fmt.Sprintf("------- Peer %s----\n", p.id),
-		fmt.Sprintf(" ~ Sender: %s\n", p.Sender),
-		fmt.Sprintf(" ~ Listener: %s", p.Listener),
+		// fmt.Sprintf(" ~ Sender: %s\n", p.Sender),
+		// fmt.Sprintf(" ~ Listener: %s", p.Listener),
 		// not very important
 		// fmt.Sprintf(" ~ State: %s\n", p.State),
 		// fmt.Sprintf(" ~ Last seen: %s\n", p.LastSeen),
