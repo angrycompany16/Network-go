@@ -13,32 +13,35 @@ import (
 	"github.com/eiannone/keyboard"
 )
 
-// TODO: When adding a third elevator, the peer for some reason takes a very long time
-// to be detected. Why could this be?
-// Fucking everything in one file yeah this is great wooh i love life
+// NOTE:
+// https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes
+// Read this if the buffer size warning appears
+// TL;DR
+// Run
+// sudo sysctl -w net.core.rmem_max=7500000
+// and
+// sudo sysctl -w net.core.wmem_max=7500000
 
 const (
 	stateBroadcastPort = 36251 // Akkordrekke
 )
 
 var (
-	timeout = time.Second * 5 // Timeout period before deleting peer
+	timeout = time.Second * 5
 )
 
 type LifeSignal struct {
-	ListenerAddr net.UDPAddr // Server address
-	SenderId     string
-	State        ElevatorState   // State of this peer
-	WorldView    []ElevatorState // State of other peers
+	ConnectionMap map[string]bool // Map of connection state of peers
+	ListenerAddr  net.UDPAddr     // I am listening on this address, send to this
+	SenderId      string
+	State         ElevatorState   // State of this peer
+	WorldView     []ElevatorState // State of other peers
 }
 
 type elevator struct {
-	id    string
-	name  string // For debugging purposes
-	state ElevatorState
-	// serverAddr net.UDPAddr
-	// clientAddr net.UDPAddr
-
+	id        string
+	name      string // For debugging purposes
+	state     ElevatorState
 	ip        net.IP
 	listener  transfer.Listener
 	peers     []*peer
@@ -49,15 +52,16 @@ type elevator struct {
 type peer struct {
 	Sender transfer.Sender // Used for sending data to this peer
 	// Listener transfer.Receiver
+	// Copnnection
 	state    ElevatorState
 	id       string
 	lastSeen time.Time
 }
 
 type ElevatorState struct {
-	Connected map[string]bool
-	Foo       int
-	Busy      bool
+	// Connected map[string]bool
+	Foo  int
+	Busy bool
 }
 
 func main() {
@@ -137,11 +141,8 @@ func (e *elevator) timeout() {
 
 		for i, peer := range e.peers {
 			if peer.lastSeen.Add(timeout).Before(time.Now()) {
-				fmt.Printf("\nRemove peer: \n%#v\n", peer)
-				// TODO: make this work. Should be a small feat.
-				// Close the connnection
-				// Make sure to only use this when TCP is fully implemented
-				// peer.Sender.QuitChan <- 1
+				fmt.Println("Removing peer:", peer)
+				peer.Sender.QuitChan <- 1
 				e.peers[i] = e.peers[len(e.peers)-1]
 				e.peers = e.peers[:len(e.peers)-1]
 			}
@@ -154,12 +155,14 @@ func (e *elevator) timeout() {
 func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 	for {
 		signal := LifeSignal{
-			ListenerAddr: e,
-			SenderId:     e.id,
-			State:        e.state,
+			ConnectionMap: make(map[string]bool),
+			ListenerAddr:  e.listener.Addr,
+			SenderId:      e.id,
+			State:         e.state,
 		}
 
 		for _, peer := range e.peers {
+			signal.ConnectionMap[peer.id] = peer.Sender.Connected
 			signal.WorldView = append(signal.WorldView, peer.state)
 		}
 
@@ -168,7 +171,6 @@ func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 	}
 }
 
-// TODO: Fix all the todos and also make this a bit more separated so it's actually possible to understand
 func (e *elevator) readLifeSignals(signalChan chan (LifeSignal)) {
 LifeSignals:
 	for lifeSignal := range signalChan {
@@ -182,16 +184,28 @@ LifeSignals:
 				_peer.lastSeen = time.Now()
 				_peer.state = lifeSignal.State
 
+				// I think QUIC might be the best thing to have graced the earth with its existence
 				// We want to connect that boy
-				connectionState, ok := _peer.state.Connected[e.id]
-				// TODO: handle !ok
-				if !connectionState && ok && !e.state.Connected[_peer.id] {
+				// Probably a good idea to check that the guy we're connecting to is also
+				// trying to connect to us
+				otherSenderConnected, ok := lifeSignal.ConnectionMap[e.id]
+				if !ok {
+					fmt.Println("fricked up")
+					continue LifeSignals
+				}
+				// fmt.Println(lifeSignal.ConnectionMap)
+				// fmt.Println(ok)
+				if !_peer.Sender.Connected && !otherSenderConnected {
+					fmt.Println("SEnding")
 					go _peer.Sender.Send()
-					// go _peer.Listener.Listen()
 
+					<-e.listener.ReadyChan
+					fmt.Println("Listener completed")
 					<-_peer.Sender.ReadyChan
-					// <-_peer.Listener.ReadyChan
-					e.state.Connected[_peer.id] = true
+					fmt.Println("Sender completed")
+					fmt.Println("Connection completed")
+					// Need to also wait for the listener to be ready
+					_peer.Sender.Connected = true
 				}
 
 				e.peersLock.Unlock()
@@ -200,20 +214,9 @@ LifeSignals:
 			}
 		}
 
-		sender := transfer.NewSender(
-			net.UDPAddr{
-				IP:   e.ip,
-				Port: transfer.GetAvailablePort(),
-			},
-			lifeSignal.ListenerAddr,
-		)
-
-		// listener := transfer.NewListenConnection(&e.listener)
+		sender := transfer.NewSender(lifeSignal.ListenerAddr)
 
 		newPeer := newPeer(sender, lifeSignal.State, lifeSignal.SenderId)
-		// it FUCKING WIRKS!!!!
-
-		e.state.Connected[newPeer.id] = false
 
 		e.peers = append(e.peers, newPeer)
 		fmt.Println("New peer added: ")
@@ -254,15 +257,7 @@ func newElevator(id string, name string, ip net.IP, state ElevatorState) elevato
 		id:    id,
 		name:  name,
 		state: state,
-		// serverAddr: net.UDPAddr{
-		// 	IP:   ip,
-		// 	Port: transfer.GetAvailablePort(),
-		// },
-		// clientAddr: net.UDPAddr{
-		// 	IP:   ip,
-		// 	Port: transfer.GetAvailablePort(),
-		// },
-		ip: ip,
+		ip:    ip,
 		listener: transfer.Listener{
 			Addr: net.UDPAddr{
 				IP:   ip,
@@ -277,16 +272,14 @@ func newElevator(id string, name string, ip net.IP, state ElevatorState) elevato
 
 func newElevatorState(Foo int) ElevatorState {
 	return ElevatorState{
-		Connected: make(map[string]bool),
-		Foo:       Foo,
-		Busy:      false,
+		Foo:  Foo,
+		Busy: false,
 	}
 }
 
 func newPeer(sender transfer.Sender, state ElevatorState, id string) *peer {
 	return &peer{
-		Sender: sender,
-		// Listener: listener,
+		Sender:   sender,
 		state:    state,
 		id:       id,
 		lastSeen: time.Now(),
@@ -295,22 +288,10 @@ func newPeer(sender transfer.Sender, state ElevatorState, id string) *peer {
 
 // Sub-optimal
 func (e elevator) String() string {
-	return fmt.Sprint(
-	// fmt.Sprintf("------- Elevator %s----\n", e.name),
-	// fmt.Sprintf(" ~ id: %s\n", e.id),
-	// fmt.Sprintf(" ~ listening on: %s", &e.listener.Addr),
-	)
+	return fmt.Sprintf("------- Elevator %s----\n ~ id: %s\n ~ listening on: %s",
+		e.name, e.id, &e.listener.Addr)
 }
 
-// Sub-optimal
-// TODO: improve using multiline strings
 func (p peer) String() string {
-	return fmt.Sprint(
-		fmt.Sprintf("------- Peer %s----\n", p.id),
-		// fmt.Sprintf(" ~ Sender: %s\n", p.Sender),
-		// fmt.Sprintf(" ~ Listener: %s", p.Listener),
-		// not very important
-		// fmt.Sprintf(" ~ State: %s\n", p.State),
-		// fmt.Sprintf(" ~ Last seen: %s\n", p.LastSeen),
-	)
+	return fmt.Sprintf("------- Peer %s----\n ~ Sender:\n %s\n", p.id, p.Sender)
 }
