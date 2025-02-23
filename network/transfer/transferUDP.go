@@ -37,7 +37,7 @@ func BroadcastSender(port int, chans ...interface{}) {
 		if len(ttj) > bufSize {
 			panic(fmt.Sprintf(
 				"Tried to send a message longer than the buffer size (length: %d, buffer size: %d)\n\t'%s'\n"+
-					"Either send smaller packets, or go to network/bcast/bcast.go and increase the buffer size",
+					"Either send smaller packets, or go to network/transfer/transferUDP.go and increase the buffer size",
 				len(ttj), bufSize, string(ttj)))
 		}
 		conn.WriteTo(ttj, addr)
