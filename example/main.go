@@ -14,13 +14,16 @@ import (
 )
 
 // NOTE:
-// https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes
 // Read this if the buffer size warning appears
+// https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes
 // TL;DR
 // Run
 // sudo sysctl -w net.core.rmem_max=7500000
 // and
 // sudo sysctl -w net.core.wmem_max=7500000
+
+// TODO: Figure out why the third elevator always takes a lot longer to connect
+// Potentially a UDP issue?
 
 const (
 	stateBroadcastPort = 36251 // Akkordrekke
@@ -31,16 +34,21 @@ var (
 )
 
 type LifeSignal struct {
-	ConnectionMap map[string]bool // Map of connection state of peers
-	ListenerAddr  net.UDPAddr     // I am listening on this address, send to this
-	SenderId      string
-	State         ElevatorState   // State of this peer
-	WorldView     []ElevatorState // State of other peers
+	// ConnectionMap map[string]bool
+	ListenerAddr net.UDPAddr
+	SenderId     string
+	State        ElevatorState
+	WorldView    []ElevatorState
+}
+
+type ElevatorMsg struct {
+	SenderId string
+	Data     int
 }
 
 type elevator struct {
 	id        string
-	name      string // For debugging purposes
+	name      string
 	state     ElevatorState
 	ip        net.IP
 	listener  transfer.Listener
@@ -48,18 +56,14 @@ type elevator struct {
 	peersLock *sync.Mutex
 }
 
-// Any other elevator
 type peer struct {
-	Sender transfer.Sender // Used for sending data to this peer
-	// Listener transfer.Receiver
-	// Copnnection
+	Sender   transfer.Sender
 	state    ElevatorState
 	id       string
 	lastSeen time.Time
 }
 
 type ElevatorState struct {
-	// Connected map[string]bool
 	Foo  int
 	Busy bool
 }
@@ -76,7 +80,8 @@ func main() {
 	go elevator.sendLifeSignal(lifeSignalChannel)
 	go elevator.readLifeSignals(lifeSignalChannel)
 
-	// Handle input and stuff for testing purposes
+	go elevator.readPeerMsgs()
+
 	for {
 		if elevator.HandleDebugInput() {
 			break
@@ -113,9 +118,6 @@ func (e *elevator) HandleDebugInput() bool {
 		fmt.Println("Busy updated to: ", e.state.Busy)
 	}
 
-	// Note: In an unbuffered channel, passing a value is blocking.
-	// Therefore it is important to always have something listening to that channel,
-	// as that will unblock the value pass
 	e.peersLock.Lock()
 	if char == 'C' || char == 'c' {
 		if len(e.peers) == 0 {
@@ -123,7 +125,8 @@ func (e *elevator) HandleDebugInput() bool {
 		}
 
 		for _, peer := range e.peers {
-			peer.Sender.DataChan <- 5
+			msg := e.newMsg(e.state.Foo)
+			peer.Sender.DataChan <- msg
 		}
 	}
 	e.peersLock.Unlock()
@@ -138,7 +141,6 @@ func (e *elevator) HandleDebugInput() bool {
 func (e *elevator) timeout() {
 	for {
 		e.peersLock.Lock()
-
 		for i, peer := range e.peers {
 			if peer.lastSeen.Add(timeout).Before(time.Now()) {
 				fmt.Println("Removing peer:", peer)
@@ -147,22 +149,30 @@ func (e *elevator) timeout() {
 				e.peers = e.peers[:len(e.peers)-1]
 			}
 		}
-
 		e.peersLock.Unlock()
+	}
+}
+
+func (e *elevator) readPeerMsgs() {
+	for {
+		msg := <-e.listener.DataChan
+		var result ElevatorMsg
+		e.listener.DecodeMsg(&msg, &result)
+		fmt.Printf("Received data %d from elevator %s\n", result.Data, result.SenderId)
 	}
 }
 
 func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 	for {
 		signal := LifeSignal{
-			ConnectionMap: make(map[string]bool),
-			ListenerAddr:  e.listener.Addr,
-			SenderId:      e.id,
-			State:         e.state,
+			// ConnectionMap: make(map[string]bool),
+			ListenerAddr: e.listener.Addr,
+			SenderId:     e.id,
+			State:        e.state,
 		}
 
 		for _, peer := range e.peers {
-			signal.ConnectionMap[peer.id] = peer.Sender.Connected
+			// signal.ConnectionMap[peer.id] = peer.Sender.Connected
 			signal.WorldView = append(signal.WorldView, peer.state)
 		}
 
@@ -183,28 +193,13 @@ LifeSignals:
 			if _peer.id == lifeSignal.SenderId {
 				_peer.lastSeen = time.Now()
 				_peer.state = lifeSignal.State
-
 				// I think QUIC might be the best thing to have graced the earth with its existence
 				// We want to connect that boy
-				// Probably a good idea to check that the guy we're connecting to is also
-				// trying to connect to us
-				otherSenderConnected, ok := lifeSignal.ConnectionMap[e.id]
-				if !ok {
-					fmt.Println("fricked up")
-					continue LifeSignals
-				}
-				// fmt.Println(lifeSignal.ConnectionMap)
-				// fmt.Println(ok)
-				if !_peer.Sender.Connected && !otherSenderConnected {
-					fmt.Println("SEnding")
+				// TODO: improve synchronization of connections so they work even under
+				// huge packet loss / just figure out why they don't work
+				if !_peer.Sender.Connected {
 					go _peer.Sender.Send()
-
-					<-e.listener.ReadyChan
-					fmt.Println("Listener completed")
 					<-_peer.Sender.ReadyChan
-					fmt.Println("Sender completed")
-					fmt.Println("Connection completed")
-					// Need to also wait for the listener to be ready
 					_peer.Sender.Connected = true
 				}
 
@@ -226,30 +221,41 @@ LifeSignals:
 	}
 }
 
-func initElevator() elevator {
-	var id, name string
-	flag.StringVar(&id, "id", "", "id of this peer")
-	flag.StringVar(&name, "name", "", "name of this peer")
-
-	flag.Parse()
-
-	ip, err := localip.LocalIP()
-	if err != nil {
-		log.Fatal("Could not get local IP adress")
+func (e *elevator) newMsg(data int) ElevatorMsg {
+	return ElevatorMsg{
+		Data:     data,
+		SenderId: e.id,
 	}
+}
 
-	IP := net.ParseIP(ip)
+func initElevator() elevator {
+	for {
+		var id, name string
+		flag.StringVar(&id, "id", "", "id of this peer")
+		flag.StringVar(&name, "name", "", "name of this peer")
 
-	elevator := newElevator(id, name, IP, newElevatorState(0))
+		flag.Parse()
 
-	// Open the TCP socket
-	go elevator.listener.Listen()
-	<-elevator.listener.ReadyChan
+		ip, err := localip.LocalIP()
+		if err != nil {
+			fmt.Println("Could not get local IP address. Error:", err)
+			fmt.Println("Retrying...")
+			time.Sleep(time.Second)
+			continue
+		}
 
-	fmt.Println("Successfully created new elevator: ")
-	fmt.Println(elevator)
+		IP := net.ParseIP(ip)
 
-	return elevator
+		elevator := newElevator(id, name, IP, newElevatorState(0))
+
+		go elevator.listener.Listen()
+		<-elevator.listener.ReadyChan
+
+		fmt.Println("Successfully created new elevator: ")
+		fmt.Println(elevator)
+
+		return elevator
+	}
 }
 
 func newElevator(id string, name string, ip net.IP, state ElevatorState) elevator {
@@ -258,13 +264,10 @@ func newElevator(id string, name string, ip net.IP, state ElevatorState) elevato
 		name:  name,
 		state: state,
 		ip:    ip,
-		listener: transfer.Listener{
-			Addr: net.UDPAddr{
-				IP:   ip,
-				Port: transfer.GetAvailablePort(),
-			},
-			ReadyChan: make(chan int),
-		},
+		listener: transfer.NewListener(net.UDPAddr{
+			IP:   ip,
+			Port: transfer.GetAvailablePort(),
+		}),
 		peers:     make([]*peer, 0),
 		peersLock: &sync.Mutex{},
 	}
@@ -286,7 +289,6 @@ func newPeer(sender transfer.Sender, state ElevatorState, id string) *peer {
 	}
 }
 
-// Sub-optimal
 func (e elevator) String() string {
 	return fmt.Sprintf("------- Elevator %s----\n ~ id: %s\n ~ listening on: %s",
 		e.name, e.id, &e.listener.Addr)
