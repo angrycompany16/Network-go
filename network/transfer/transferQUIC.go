@@ -8,40 +8,50 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
+	"os"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
 )
 
 // P2P connections written in QUIC.
-// TODO: make the program retry instead of failing when a connection fails (or similar)
+// TODO: Make better variable names
+// TODO: Better timing with disconnect of peer connections and UDP disconnect
+// TODO: Rework which variables are public/private
 
 const (
 	p2pBufferSize = 1024
+	InitMessage   = "INITIALIZE"
 )
 
 type Listener struct {
-	Addr      net.UDPAddr
-	ReadyChan chan int
-	DataChan  chan interface{}
+	Addr           net.UDPAddr
+	ReadyChan      chan int
+	QuitChan       chan string
+	DataChan       chan interface{}
+	ConnectionChan chan net.Addr
 }
 
 type Sender struct {
+	Addr      net.UDPAddr
+	id        string
+	FromAddr  net.Addr
+	Connected bool
 	DataChan  chan interface{}
 	QuitChan  chan int
 	ReadyChan chan int
-	Addr      net.UDPAddr
-	Connected bool
 }
 
 func (l *Listener) Listen() {
 	var listener *quic.Listener
 	var err error
+	listenConfig := quic.Config{KeepAlivePeriod: time.Second * 5}
 	for {
-		listener, err = quic.ListenAddr(l.Addr.String(), generateTLSConfig(), nil)
+		listener, err = quic.ListenAddr(l.Addr.String(), generateTLSConfig(), &listenConfig)
 		if err != nil {
 			fmt.Println("Encountered error when setting up listener:", err)
 			fmt.Println("Retrying...")
@@ -55,8 +65,11 @@ func (l *Listener) Listen() {
 	fmt.Println("Listener ready on port", l.Addr.Port)
 	l.ReadyChan <- 1
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	for {
-		conn, err := listener.Accept(context.Background())
+		conn, err := listener.Accept(ctx)
 		if err != nil {
 			fmt.Println("Error when accepting connection from", conn.RemoteAddr())
 			fmt.Println("Failed to accept connection:", err)
@@ -69,10 +82,15 @@ func (l *Listener) Listen() {
 }
 
 func (l *Listener) handleConnection(conn quic.Connection) {
-	var stream quic.Stream
+	// setup local variable id
+	var id string
+	shouldQuit := false
+	var stream quic.ReceiveStream
 	var err error
+	// ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// defer cancel()
 	for {
-		stream, err = conn.AcceptStream(context.Background())
+		stream, err = conn.AcceptUniStream(context.Background())
 		if err != nil {
 			fmt.Println("Error when opening data stream from", conn.RemoteAddr())
 			fmt.Println(err)
@@ -84,17 +102,41 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 	}
 
 	buffer := make([]byte, p2pBufferSize)
+
+	go func() {
+		for _id := range l.QuitChan {
+			fmt.Println(_id)
+			fmt.Println(id)
+			if _id == id {
+				shouldQuit = true
+			}
+		}
+	}()
+
 	for {
+		if shouldQuit {
+			fmt.Println("Closing connection...")
+			return
+		}
+		stream.SetReadDeadline(time.Now().Add(10 * time.Second))
 		n, err := stream.Read(buffer)
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				fmt.Println("Timed out")
+				continue
+			}
+
 			fmt.Println("Failed to read from stream from", conn.RemoteAddr())
 			fmt.Println(err)
 			continue
 		}
 
+		if string(buffer[0:len(InitMessage)]) == InitMessage {
+			id = string(buffer[len(InitMessage):n])
+			continue
+		}
 		var result interface{}
 		json.Unmarshal(buffer[0:n], &result)
-		fmt.Println(result)
 
 		l.DataChan <- result
 	}
@@ -112,17 +154,21 @@ func (l *Listener) DecodeMsg(msg interface{}, target interface{}) error {
 	return nil
 }
 
+// take id as parameter
 func (s *Sender) Send() {
+	// This is copied from https://github.com/quic-go/quic-go/blob/master/example/echo/echo.go
 	tlsConf := &tls.Config{
 		InsecureSkipVerify: true,
-		NextProtos:         []string{"quic-echo-example"},
+		NextProtos:         []string{"foo"},
 	}
 	quicConf := quic.Config{KeepAlivePeriod: time.Second * 25}
 	var conn quic.Connection
-	var stream quic.Stream
+	var stream quic.SendStream
 	var err error
+
+	// TODO: We have process pairs. Use process pairs (don't be scared to crash if something
+	// is not recoverable)
 	for {
-		// This is copied from https://github.com/quic-go/quic-go/blob/master/example/echo/echo.go
 		conn, err = quic.DialAddr(context.Background(), s.Addr.String(), tlsConf, &quicConf)
 
 		if err != nil {
@@ -133,17 +179,18 @@ func (s *Sender) Send() {
 		}
 		defer conn.CloseWithError(0, "")
 
-		stream, err = conn.OpenStreamSync(context.Background())
+		stream, err = conn.OpenUniStream()
 		if err != nil {
 			fmt.Println("Error when making stream:", err)
 			fmt.Println("Retrying...")
 			time.Sleep(time.Second)
 		}
+		stream.Write([]byte(fmt.Sprintf("%s%s", InitMessage, s.id))) // Replace with id message
 		defer stream.Close()
-
 		break
 	}
 
+	s.FromAddr = conn.LocalAddr()
 	fmt.Printf("---- SENDER %s--->%s CONNECTED ----\n", conn.LocalAddr(), conn.RemoteAddr())
 	s.ReadyChan <- 1
 
@@ -151,6 +198,7 @@ func (s *Sender) Send() {
 		select {
 		case <-s.QuitChan:
 			fmt.Printf("Closing Send connection to %s...\n", &s.Addr)
+			stream.Close()
 			return
 		case data := <-s.DataChan:
 			fmt.Println("Sending data to ", s.Addr.String())
@@ -186,19 +234,21 @@ func (s Sender) String() string {
 
 func NewListener(addr net.UDPAddr) Listener {
 	return Listener{
-		DataChan:  make(chan interface{}),
-		ReadyChan: make(chan int),
 		Addr:      addr,
+		ReadyChan: make(chan int),
+		QuitChan:  make(chan string),
+		DataChan:  make(chan interface{}),
 	}
 }
 
-func NewSender(addr net.UDPAddr) Sender {
+func NewSender(addr net.UDPAddr, id string) Sender {
 	return Sender{
+		id:        id,
+		Addr:      addr,
+		Connected: false,
 		DataChan:  make(chan interface{}),
 		QuitChan:  make(chan int),
 		ReadyChan: make(chan int),
-		Addr:      addr,
-		Connected: false,
 	}
 }
 
@@ -238,6 +288,6 @@ func generateTLSConfig() *tls.Config {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
-		NextProtos:   []string{"quic-echo-example"},
+		NextProtos:   []string{"foo"},
 	}
 }

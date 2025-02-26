@@ -34,7 +34,6 @@ var (
 )
 
 type LifeSignal struct {
-	// ConnectionMap map[string]bool
 	ListenerAddr net.UDPAddr
 	SenderId     string
 	State        ElevatorState
@@ -145,6 +144,7 @@ func (e *elevator) timeout() {
 			if peer.lastSeen.Add(timeout).Before(time.Now()) {
 				fmt.Println("Removing peer:", peer)
 				peer.Sender.QuitChan <- 1
+				e.listener.QuitChan <- peer.id
 				e.peers[i] = e.peers[len(e.peers)-1]
 				e.peers = e.peers[:len(e.peers)-1]
 			}
@@ -165,14 +165,12 @@ func (e *elevator) readPeerMsgs() {
 func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 	for {
 		signal := LifeSignal{
-			// ConnectionMap: make(map[string]bool),
 			ListenerAddr: e.listener.Addr,
 			SenderId:     e.id,
 			State:        e.state,
 		}
 
 		for _, peer := range e.peers {
-			// signal.ConnectionMap[peer.id] = peer.Sender.Connected
 			signal.WorldView = append(signal.WorldView, peer.state)
 		}
 
@@ -200,6 +198,7 @@ LifeSignals:
 				if !_peer.Sender.Connected {
 					go _peer.Sender.Send()
 					<-_peer.Sender.ReadyChan
+
 					_peer.Sender.Connected = true
 				}
 
@@ -209,7 +208,7 @@ LifeSignals:
 			}
 		}
 
-		sender := transfer.NewSender(lifeSignal.ListenerAddr)
+		sender := transfer.NewSender(lifeSignal.ListenerAddr, e.id)
 
 		newPeer := newPeer(sender, lifeSignal.State, lifeSignal.SenderId)
 
