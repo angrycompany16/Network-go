@@ -183,6 +183,8 @@ func (s *Sender) Send() {
 	var stream quic.SendStream
 	var err error
 
+	// TODO: CLEAN.UP.
+
 	// BIG problem: When there is packet loss on a port we get the (seemingly unavoidable)
 	// permission error. However, we cannot simply send to a different port as this port
 	// will not be the same one that the system is listening to
