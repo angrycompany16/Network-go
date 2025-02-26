@@ -1,15 +1,7 @@
-Network module for Go (UDP broadcast only)
+Network module for Go (UDP broadcast + QUIC p2p connections)
 ==========================================
 
-See [`main.go`](main.go) for usage example. The code is runnable with just `go run main.go`
-
-Add these lines to your `go.mod` file:
-```
-require Network-go v0.0.0
-replace Network-go => ./Network-go
-```
-Where `./Network-go` is the relative path to this folder, after you have downloaded it.
-
+See [`example/main.go`](example/main.go) for usage example.
 
 Features
 --------
@@ -20,9 +12,5 @@ Peers on the local network can be detected by supplying your own ID to a transmi
 
 Finding your own local IP address can be done with the [LocalIP](network/localip/localip.go) convenience function, but only when you are connected to the internet.
 
-
-
-
-I made TCP
-
-
+QUIC extension:
+P2P connections using QUIC. Setting up a connection is done using the listener and sender structs. 
