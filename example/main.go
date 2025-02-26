@@ -13,6 +13,8 @@ import (
 	"github.com/eiannone/keyboard"
 )
 
+// Problem: at 90% packet loss peers time out even after five seconds
+
 // NOTE:
 // Read this if the buffer size warning appears
 // https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes

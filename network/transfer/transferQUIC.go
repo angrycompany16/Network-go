@@ -24,8 +24,9 @@ import (
 // TODO: Rework which variables are public/private
 
 const (
-	p2pBufferSize = 1024
-	InitMessage   = "INITIALIZE"
+	p2pBufferSize    = 1024
+	InitMessage      = "INITIALIZE"
+	applicationError = 0x2468
 )
 
 type Listener struct {
@@ -82,13 +83,10 @@ func (l *Listener) Listen() {
 }
 
 func (l *Listener) handleConnection(conn quic.Connection) {
-	// setup local variable id
 	var id string
 	shouldQuit := false
 	var stream quic.ReceiveStream
 	var err error
-	// ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	// defer cancel()
 	for {
 		stream, err = conn.AcceptUniStream(context.Background())
 		if err != nil {
@@ -126,6 +124,14 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 				continue
 			}
 
+			// TODO: handle other kind of timeout as well
+
+			if ierr, ok := err.(*quic.ApplicationError); ok {
+				fmt.Println(ierr)
+				fmt.Println("Closing from application error (Might be due to high packet loss)")
+				return
+			}
+
 			fmt.Println("Failed to read from stream from", conn.RemoteAddr())
 			fmt.Println(err)
 			continue
@@ -161,10 +167,27 @@ func (s *Sender) Send() {
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"foo"},
 	}
-	quicConf := quic.Config{KeepAlivePeriod: time.Second * 25}
+	quicConf := quic.Config{
+		InitialStreamReceiveWindow:     10 * 1024 * 1024,
+		MaxStreamReceiveWindow:         10 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 15 * 1024 * 1024,
+		MaxConnectionReceiveWindow:     15 * 1024 * 1024,
+
+		MaxIdleTimeout: 30 * time.Second,
+
+		EnableDatagrams: true,
+
+		KeepAlivePeriod: time.Second * 25,
+	}
 	var conn quic.Connection
 	var stream quic.SendStream
 	var err error
+
+	// BIG problem: When there is packet loss on a port we get the (seemingly unavoidable)
+	// permission error. However, we cannot simply send to a different port as this port
+	// will not be the same one that the system is listening to
+
+	// That's no good...
 
 	// TODO: We have process pairs. Use process pairs (don't be scared to crash if something
 	// is not recoverable)
@@ -177,16 +200,15 @@ func (s *Sender) Send() {
 			time.Sleep(time.Second)
 			continue
 		}
-		defer conn.CloseWithError(0, "")
+		defer conn.CloseWithError(applicationError, "Application error")
 
-		stream, err = conn.OpenUniStream()
+		stream, err = s.makeStream(conn)
 		if err != nil {
-			fmt.Println("Error when making stream:", err)
-			fmt.Println("Retrying...")
+			fmt.Println("Error when making stream, retrying....")
 			time.Sleep(time.Second)
+			continue
 		}
-		stream.Write([]byte(fmt.Sprintf("%s%s", InitMessage, s.id))) // Replace with id message
-		defer stream.Close()
+
 		break
 	}
 
@@ -194,6 +216,7 @@ func (s *Sender) Send() {
 	fmt.Printf("---- SENDER %s--->%s CONNECTED ----\n", conn.LocalAddr(), conn.RemoteAddr())
 	s.ReadyChan <- 1
 
+	// Problem: We get the permission denied error message
 	for {
 		select {
 		case <-s.QuitChan:
@@ -222,10 +245,27 @@ func (s *Sender) Send() {
 			if err != nil {
 				fmt.Println("Could not send data over stream")
 				fmt.Println(err)
+				if errors.Is(err, os.ErrPermission) {
+					// fmt.Println("Time to")
+					for {
+					}
+					// stream.CancelWrite(quic.StreamErrorCode(quic.NoError))
+					// s.QuitChan <- 1
+					continue
+				}
 				continue
 			}
 		}
 	}
+}
+
+func (s *Sender) makeStream(conn quic.Connection) (quic.SendStream, error) {
+	stream, err := conn.OpenUniStream()
+	if err != nil {
+		return stream, err
+	}
+	stream.Write([]byte(fmt.Sprintf("%s%s", InitMessage, s.id))) // Replace with id message
+	return stream, nil
 }
 
 func (s Sender) String() string {
@@ -247,7 +287,7 @@ func NewSender(addr net.UDPAddr, id string) Sender {
 		Addr:      addr,
 		Connected: false,
 		DataChan:  make(chan interface{}),
-		QuitChan:  make(chan int),
+		QuitChan:  make(chan int, 1),
 		ReadyChan: make(chan int),
 	}
 }
