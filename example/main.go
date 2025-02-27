@@ -4,7 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -195,8 +197,6 @@ LifeSignals:
 				_peer.state = lifeSignal.State
 				// I think QUIC might be the best thing to have graced the earth with its existence
 				// We want to connect that boy
-				// TODO: improve synchronization of connections so they work even under
-				// huge packet loss / just figure out why they don't work
 				if !_peer.Sender.Connected {
 					go _peer.Sender.Send()
 					<-_peer.Sender.ReadyChan
@@ -236,6 +236,13 @@ func initElevator() elevator {
 		flag.StringVar(&name, "name", "", "name of this peer")
 
 		flag.Parse()
+
+		if id == "" {
+			r := rand.Int()
+			fmt.Println("No id was given. Using randomly generated number", r)
+			id = strconv.Itoa(r)
+			// fmt.Println(id)
+		}
 
 		ip, err := localip.LocalIP()
 		if err != nil {

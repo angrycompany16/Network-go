@@ -167,6 +167,7 @@ func (s *Sender) Send() {
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"foo"},
 	}
+	// Custom config for improved handling of packet loss
 	quicConf := quic.Config{
 		InitialStreamReceiveWindow:     10 * 1024 * 1024,
 		MaxStreamReceiveWindow:         10 * 1024 * 1024,
@@ -191,8 +192,6 @@ func (s *Sender) Send() {
 
 	// That's no good...
 
-	// TODO: We have process pairs. Use process pairs (don't be scared to crash if something
-	// is not recoverable)
 	for {
 		conn, err = quic.DialAddr(context.Background(), s.Addr.String(), tlsConf, &quicConf)
 
@@ -248,12 +247,12 @@ func (s *Sender) Send() {
 				fmt.Println("Could not send data over stream")
 				fmt.Println(err)
 				if errors.Is(err, os.ErrPermission) {
-					// fmt.Println("Time to")
-					for {
-					}
+					// TODO: Find a way to recover form this error?
+					// maybe make the guy who is listening crash as well lmao
+					fmt.Println("The unrecoverable error has been encountered. Time to die!")
+					panic(err)
 					// stream.CancelWrite(quic.StreamErrorCode(quic.NoError))
 					// s.QuitChan <- 1
-					continue
 				}
 				continue
 			}
