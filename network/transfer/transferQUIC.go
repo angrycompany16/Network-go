@@ -18,11 +18,6 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
-// P2P connections written in QUIC.
-// TODO: Make better variable names
-// TODO: Better timing with disconnect of peer connections and UDP disconnect
-// TODO: Rework which variables are public/private
-
 const (
 	p2pBufferSize    = 1024
 	InitMessage      = "INITIALIZE"
@@ -124,8 +119,6 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 				continue
 			}
 
-			// TODO: handle other kind of timeout as well
-
 			if ierr, ok := err.(*quic.ApplicationError); ok {
 				fmt.Println(ierr)
 				fmt.Println("Closing from application error (Might be due to high packet loss)")
@@ -148,19 +141,6 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 	}
 }
 
-// NOTE: This function should always be called with target being a *pointer* to a struct
-func (l *Listener) DecodeMsg(msg interface{}, target interface{}) error {
-	jsonEnc, _ := json.Marshal(msg)
-	err := json.Unmarshal(jsonEnc, target)
-
-	if err != nil {
-		fmt.Println("Could not parse message:", msg)
-		return err
-	}
-	return nil
-}
-
-// take id as parameter
 func (s *Sender) Send() {
 	// This is copied from https://github.com/quic-go/quic-go/blob/master/example/echo/echo.go
 	tlsConf := &tls.Config{
@@ -183,14 +163,6 @@ func (s *Sender) Send() {
 	var conn quic.Connection
 	var stream quic.SendStream
 	var err error
-
-	// TODO: CLEAN.UP.
-
-	// BIG problem: When there is packet loss on a port we get the (seemingly unavoidable)
-	// permission error. However, we cannot simply send to a different port as this port
-	// will not be the same one that the system is listening to
-
-	// That's no good...
 
 	for {
 		conn, err = quic.DialAddr(context.Background(), s.Addr.String(), tlsConf, &quicConf)
@@ -217,7 +189,6 @@ func (s *Sender) Send() {
 	fmt.Printf("---- SENDER %s--->%s CONNECTED ----\n", conn.LocalAddr(), conn.RemoteAddr())
 	s.ReadyChan <- 1
 
-	// Problem: We get the permission denied error message
 	for {
 		select {
 		case <-s.QuitChan:
@@ -247,12 +218,8 @@ func (s *Sender) Send() {
 				fmt.Println("Could not send data over stream")
 				fmt.Println(err)
 				if errors.Is(err, os.ErrPermission) {
-					// TODO: Find a way to recover form this error?
-					// maybe make the guy who is listening crash as well lmao
 					fmt.Println("The unrecoverable error has been encountered. Time to die!")
 					panic(err)
-					// stream.CancelWrite(quic.StreamErrorCode(quic.NoError))
-					// s.QuitChan <- 1
 				}
 				continue
 			}
@@ -320,6 +287,7 @@ func generateTLSConfig() *tls.Config {
 	if err != nil {
 		panic(err)
 	}
+	// NOTE: This seems to be where the error occurs
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 

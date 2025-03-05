@@ -13,4 +13,8 @@ Peers on the local network can be detected by supplying your own ID to a transmi
 Finding your own local IP address can be done with the [LocalIP](network/localip/localip.go) convenience function, but only when you are connected to the internet.
 
 QUIC extension:
-P2P connections using QUIC. Setting up a connection is done using the listener and sender structs. 
+P2P connections using QUIC. Setting up a connection is done using the listener and sender structs. There's also a small packet loss script included as the provided one seems quite dysfunctional.
+
+See example/main.go for a use case example
+
+Note that all changes are in transferQUIC.go and main.go

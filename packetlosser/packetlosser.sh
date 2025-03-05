@@ -1,4 +1,5 @@
 # Credit of claude.ai
+# Simple script for simulating packet loss with some basic parameters such as a port/reset
 
 while getopts "fr:" flag; do
  case $flag in

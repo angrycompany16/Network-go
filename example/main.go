@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -25,9 +26,6 @@ import (
 // sudo sysctl -w net.core.rmem_max=7500000
 // and
 // sudo sysctl -w net.core.wmem_max=7500000
-
-// TODO: Figure out why the third elevator always takes a lot longer to connect
-// Potentially a UDP issue?
 
 const (
 	stateBroadcastPort = 36251 // Akkordrekke
@@ -161,7 +159,7 @@ func (e *elevator) readPeerMsgs() {
 	for {
 		msg := <-e.listener.DataChan
 		var result ElevatorMsg
-		e.listener.DecodeMsg(&msg, &result)
+		DecodeMsg(&msg, &result)
 		fmt.Printf("Received data %d from elevator %s\n", result.Data, result.SenderId)
 	}
 }
@@ -241,7 +239,6 @@ func initElevator() elevator {
 			r := rand.Int()
 			fmt.Println("No id was given. Using randomly generated number", r)
 			id = strconv.Itoa(r)
-			// fmt.Println(id)
 		}
 
 		ip, err := localip.LocalIP()
@@ -295,6 +292,17 @@ func newPeer(sender transfer.Sender, state ElevatorState, id string) *peer {
 		id:       id,
 		lastSeen: time.Now(),
 	}
+}
+
+func DecodeMsg(msg interface{}, target interface{}) error {
+	jsonEnc, _ := json.Marshal(msg)
+	err := json.Unmarshal(jsonEnc, target)
+
+	if err != nil {
+		fmt.Println("Could not parse message:", msg)
+		return err
+	}
+	return nil
 }
 
 func (e elevator) String() string {
