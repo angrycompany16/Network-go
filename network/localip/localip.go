@@ -3,13 +3,19 @@ package localip
 import (
 	"net"
 	"strings"
+	"time"
+)
+
+const (
+	timeout = time.Second * 10
 )
 
 var localIP string
 
 func LocalIP() (string, error) {
 	if localIP == "" {
-		conn, err := net.DialTCP("tcp4", nil, &net.TCPAddr{IP: []byte{8, 8, 8, 8}, Port: 53})
+		dialer := net.Dialer{Timeout: timeout}
+		conn, err := dialer.Dial("udp", "8.8.8.8:80")
 		if err != nil {
 			return "", err
 		}
