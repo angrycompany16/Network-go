@@ -6,13 +6,16 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/angrycompany16/Network-go/network/broadcast"
+	"github.com/angrycompany16/Network-go/network/connection"
 	"github.com/angrycompany16/Network-go/network/localip"
-	"github.com/angrycompany16/Network-go/network/transfer"
 	"github.com/eiannone/keyboard"
+	"github.com/mitchellh/mapstructure"
 )
 
 // Problem: at 90% packet loss peers time out even after five seconds
@@ -49,18 +52,18 @@ type ElevatorMsg struct {
 	Data     int
 }
 
-type elevator struct {
+type node struct {
 	id        string
 	name      string
 	state     ElevatorState
 	ip        net.IP
-	listener  transfer.Listener
+	listener  connection.Listener
 	peers     []*peer
 	peersLock *sync.Mutex
 }
 
 type peer struct {
-	Sender   transfer.Sender
+	Sender   connection.Sender
 	state    ElevatorState
 	id       string
 	lastSeen time.Time
@@ -76,8 +79,8 @@ func main() {
 
 	lifeSignalChannel := make(chan LifeSignal)
 
-	go transfer.BroadcastSender(stateBroadcastPort, lifeSignalChannel)
-	go transfer.BroadcastReceiver(stateBroadcastPort, lifeSignalChannel)
+	go broadcast.BroadcastSender(stateBroadcastPort, lifeSignalChannel)
+	go broadcast.BroadcastReceiver(stateBroadcastPort, lifeSignalChannel)
 
 	go elevator.timeout()
 	go elevator.sendLifeSignal(lifeSignalChannel)
@@ -92,23 +95,23 @@ func main() {
 	}
 }
 
-func (e *elevator) HandleDebugInput() bool {
+func (n *node) HandleDebugInput() bool {
 	char, key, err := keyboard.GetSingleKey()
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	if char == 'A' || char == 'a' {
-		e.state.Foo++
-		fmt.Println("Value foo update: ", e.state.Foo)
+		n.state.Foo++
+		fmt.Println("Value foo update: ", n.state.Foo)
 	}
 
 	if char == 'S' || char == 's' {
-		if len(e.peers) == 0 {
+		if len(n.peers) == 0 {
 			fmt.Println("No peers!")
 		}
 
-		for i, peer := range e.peers {
+		for i, peer := range n.peers {
 			fmt.Println()
 			fmt.Println("-------------------------------")
 			fmt.Printf("Peer %d: %#v\n", i, peer)
@@ -117,22 +120,22 @@ func (e *elevator) HandleDebugInput() bool {
 	}
 
 	if char == 'B' || char == 'b' {
-		e.state.Busy = !e.state.Busy
-		fmt.Println("Busy updated to: ", e.state.Busy)
+		n.state.Busy = !n.state.Busy
+		fmt.Println("Busy updated to: ", n.state.Busy)
 	}
 
-	e.peersLock.Lock()
+	n.peersLock.Lock()
 	if char == 'C' || char == 'c' {
-		if len(e.peers) == 0 {
+		if len(n.peers) == 0 {
 			fmt.Println("No peers!")
 		}
 
-		for _, peer := range e.peers {
-			msg := e.newMsg(e.state.Foo)
+		for _, peer := range n.peers {
+			msg := n.newMsg(n.state.Foo)
 			peer.Sender.DataChan <- msg
 		}
 	}
-	e.peersLock.Unlock()
+	n.peersLock.Unlock()
 
 	if key == keyboard.KeyCtrlC {
 		fmt.Println("Exit")
@@ -141,40 +144,47 @@ func (e *elevator) HandleDebugInput() bool {
 	return false
 }
 
-func (e *elevator) timeout() {
+func (n *node) timeout() {
 	for {
-		e.peersLock.Lock()
-		for i, peer := range e.peers {
+		n.peersLock.Lock()
+		for i, peer := range n.peers {
 			if peer.lastSeen.Add(timeout).Before(time.Now()) {
 				fmt.Println("Removing peer:", peer)
 				peer.Sender.QuitChan <- 1
-				e.listener.QuitChan <- peer.id
-				e.peers[i] = e.peers[len(e.peers)-1]
-				e.peers = e.peers[:len(e.peers)-1]
+				n.listener.QuitChan <- peer.id
+				n.peers[i] = n.peers[len(n.peers)-1]
+				n.peers = n.peers[:len(n.peers)-1]
 			}
 		}
-		e.peersLock.Unlock()
+		n.peersLock.Unlock()
 	}
 }
 
-func (e *elevator) readPeerMsgs() {
-	for {
-		msg := <-e.listener.DataChan
-		var result ElevatorMsg
-		e.listener.DecodeMsg(&msg, &result)
-		fmt.Printf("Received data %d from elevator %s\n", result.Data, result.SenderId)
+func (n *node) readPeerMsgs() {
+	for msg := range n.listener.DataChan {
+		var message connection.Message
+		mapstructure.Decode(msg, &message)
+		switch message.TypeName {
+		case reflect.TypeOf(ElevatorMsg{}).Name():
+			var msg ElevatorMsg
+			err := mapstructure.Decode(message.Data, &msg)
+			if err != nil {
+				log.Fatal("Could not decode elevator request")
+			}
+			fmt.Printf("Received data %d from elevator %s\n", msg.Data, msg.SenderId)
+		}
 	}
 }
 
-func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
+func (n *node) sendLifeSignal(signalChan chan (LifeSignal)) {
 	for {
 		signal := LifeSignal{
-			ListenerAddr: e.listener.Addr,
-			SenderId:     e.id,
-			State:        e.state,
+			ListenerAddr: n.listener.Addr,
+			SenderId:     n.id,
+			State:        n.state,
 		}
 
-		for _, peer := range e.peers {
+		for _, peer := range n.peers {
 			signal.WorldView = append(signal.WorldView, peer.state)
 		}
 
@@ -183,98 +193,103 @@ func (e *elevator) sendLifeSignal(signalChan chan (LifeSignal)) {
 	}
 }
 
-func (e *elevator) readLifeSignals(signalChan chan (LifeSignal)) {
+func (n *node) readLifeSignals(signalChan chan (LifeSignal)) {
 LifeSignals:
 	for lifeSignal := range signalChan {
-		if e.id == lifeSignal.SenderId {
+		if n.id == lifeSignal.SenderId {
 			continue
 		}
 
-		e.peersLock.Lock()
-		for _, _peer := range e.peers {
+		n.peersLock.Lock()
+		for _, _peer := range n.peers {
 			if _peer.id == lifeSignal.SenderId {
 				_peer.lastSeen = time.Now()
 				_peer.state = lifeSignal.State
-				// I think QUIC might be the best thing to have graced the earth with its existence
+				// I think QUIC might be the best thing to have graced the earth with its
+				// existence
 				// We want to connect that boy
+				// Check if sender port matches peer
 				if !_peer.Sender.Connected {
 					go _peer.Sender.Send()
 					<-_peer.Sender.ReadyChan
-
 					_peer.Sender.Connected = true
 				}
 
-				e.peersLock.Unlock()
+				// Are we sending to the wrong channel?
+				if _peer.Sender.Addr.Port != lifeSignal.ListenerAddr.Port {
+					fmt.Printf("Sending to port %d, but peer is listening on port %d\n", _peer.Sender.Addr.Port, lifeSignal.ListenerAddr.Port)
+					_peer.Sender.QuitChan <- 1
+					_peer.Sender.Addr.Port = lifeSignal.ListenerAddr.Port
+					go _peer.Sender.Send()
+					<-_peer.Sender.ReadyChan
+					fmt.Println("Done")
+				}
+
+				n.peersLock.Unlock()
 
 				continue LifeSignals
 			}
 		}
 
-		sender := transfer.NewSender(lifeSignal.ListenerAddr, e.id)
+		sender := connection.NewSender(lifeSignal.ListenerAddr, n.id)
 
 		newPeer := newPeer(sender, lifeSignal.State, lifeSignal.SenderId)
 
-		e.peers = append(e.peers, newPeer)
+		n.peers = append(n.peers, newPeer)
 		fmt.Println("New peer added: ")
 		fmt.Println(newPeer)
 
-		e.peersLock.Unlock()
+		n.peersLock.Unlock()
 	}
 }
 
-func (e *elevator) newMsg(data int) ElevatorMsg {
+func (n *node) newMsg(data int) ElevatorMsg {
 	return ElevatorMsg{
 		Data:     data,
-		SenderId: e.id,
+		SenderId: n.id,
 	}
 }
 
-func initElevator() elevator {
-	for {
-		var id, name string
-		flag.StringVar(&id, "id", "", "id of this peer")
-		flag.StringVar(&name, "name", "", "name of this peer")
+func initElevator() node {
+	var id, name string
+	flag.StringVar(&id, "id", "", "id of this peer")
+	flag.StringVar(&name, "name", "", "name of this peer")
 
-		flag.Parse()
+	flag.Parse()
 
-		if id == "" {
-			r := rand.Int()
-			fmt.Println("No id was given. Using randomly generated number", r)
-			id = strconv.Itoa(r)
-			// fmt.Println(id)
-		}
-
-		ip, err := localip.LocalIP()
-		if err != nil {
-			fmt.Println("Could not get local IP address. Error:", err)
-			fmt.Println("Retrying...")
-			time.Sleep(time.Second)
-			continue
-		}
-
-		IP := net.ParseIP(ip)
-
-		elevator := newElevator(id, name, IP, newElevatorState(0))
-
-		go elevator.listener.Listen()
-		<-elevator.listener.ReadyChan
-
-		fmt.Println("Successfully created new elevator: ")
-		fmt.Println(elevator)
-
-		return elevator
+	if id == "" {
+		r := rand.Int()
+		fmt.Println("No id was given. Using randomly generated number", r)
+		id = strconv.Itoa(r)
 	}
+
+	ip, err := localip.LocalIP()
+	if err != nil {
+		log.Fatal("Could not get local IP address. Error:", err)
+	}
+
+	IP := net.ParseIP(ip)
+
+	elevator := newElevator(id, name, IP, newElevatorState(0))
+
+	go elevator.listener.Listen()
+	<-elevator.listener.ReadyChan
+
+	fmt.Println("Successfully created new elevator: ")
+	fmt.Println(elevator)
+
+	return elevator
 }
 
-func newElevator(id string, name string, ip net.IP, state ElevatorState) elevator {
-	return elevator{
+func newElevator(id string, name string, ip net.IP, state ElevatorState) node {
+	return node{
 		id:    id,
 		name:  name,
 		state: state,
 		ip:    ip,
-		listener: transfer.NewListener(net.UDPAddr{
+		listener: connection.NewListener(net.UDPAddr{
 			IP:   ip,
-			Port: transfer.GetAvailablePort(),
+			Port: connection.GetAvailablePort(),
 		}),
 		peers:     make([]*peer, 0),
 		peersLock: &sync.Mutex{},
@@ -288,7 +303,7 @@ func newElevatorState(Foo int) ElevatorState {
 	}
 }
 
-func newPeer(sender transfer.Sender, state ElevatorState, id string) *peer {
+func newPeer(sender connection.Sender, state ElevatorState, id string) *peer {
 	return &peer{
 		Sender:   sender,
 		state:    state,
@@ -297,11 +312,11 @@ func newPeer(sender transfer.Sender, state ElevatorState, id string) *peer {
 	}
 }
 
-func (e elevator) String() string {
+func (e node) String() string {
 	return fmt.Sprintf("------- Elevator %s----\n ~ id: %s\n ~ listening on: %s",
 		e.name, e.id, &e.listener.Addr)
 }
 
 func (p peer) String() string {
-	return fmt.Sprintf("------- Peer %s----\n ~ Sender:\n %s\n", p.id, p.Sender)
+	return fmt.Sprintf("------- Peer ----\n ~ id: %s\n ~ sends to: %s\n", p.id, &p.Sender.Addr)
 }
