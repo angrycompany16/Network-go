@@ -6,7 +6,6 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
-	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -37,7 +36,7 @@ const (
 )
 
 var (
-	timeout = time.Second * 5
+	timeout = time.Millisecond * 500
 )
 
 // Note that all members must be public
@@ -58,17 +57,17 @@ type node struct {
 	name      string
 	state     ElevatorState
 	ip        net.IP
-	listener  connection.Listener
+	listener  *connection.Listener
 	peers     []*peer
 	peersLock *sync.Mutex
 }
 
 type peer struct {
-	sender    connection.Sender
-	state     ElevatorState
-	id        string
-	lastSeen  time.Time
-	connected bool
+	sender          connection.Sender
+	state           ElevatorState
+	id              string
+	lastSeen        time.Time
+	senderConnected bool
 }
 
 type ElevatorState struct {
@@ -151,9 +150,9 @@ func (n *node) timeout() {
 		n.peersLock.Lock()
 		for i, peer := range n.peers {
 			if peer.lastSeen.Add(timeout).Before(time.Now()) {
-				fmt.Println("Removing peer:", peer)
+				fmt.Println("Removing peer\n", peer)
 				peer.sender.QuitChan <- 1
-				n.listener.QuitChan <- peer.id
+				n.listener.LostPeers[peer.id] = true
 				n.peers[i] = n.peers[len(n.peers)-1]
 				n.peers = n.peers[:len(n.peers)-1]
 			}
@@ -166,15 +165,15 @@ func (n *node) readPeerMsgs() {
 	for msg := range n.listener.DataChan {
 		var message connection.Message
 		mapstructure.Decode(msg, &message)
-		switch message.TypeName {
-		case reflect.TypeOf(ElevatorMsg{}).Name():
-			var msg ElevatorMsg
-			err := mapstructure.Decode(message.Data, &msg)
-			if err != nil {
-				log.Fatal("Could not decode elevator request")
-			}
-			fmt.Printf("Received data %d from elevator %s\n", msg.Data, msg.SenderId)
+
+		var msg ElevatorMsg
+		err := mapstructure.Decode(message.Data, &msg)
+
+		if err != nil {
+			log.Fatal("Could not decode elevator request:", err)
 		}
+
+		fmt.Printf("Received data %d from elevator %s\n", msg.Data, msg.SenderId)
 	}
 }
 
@@ -210,18 +209,19 @@ LifeSignals:
 				// I think QUIC might be the best thing to have graced the earth with its
 				// existence
 				// We want to connect that boy
-				if !_peer.connected {
+
+				if !_peer.senderConnected {
+					_peer.sender.Init()
 					go _peer.sender.Send()
-					<-_peer.sender.ReadyChan
-					_peer.connected = true
+					_peer.senderConnected = true
 				}
 
 				if _peer.sender.Addr.Port != lifeSignal.ListenerAddr.Port {
 					fmt.Printf("Sending to port %d, but peer is listening on port %d\n", _peer.sender.Addr.Port, lifeSignal.ListenerAddr.Port)
 					_peer.sender.QuitChan <- 1
 					_peer.sender.Addr.Port = lifeSignal.ListenerAddr.Port
+					_peer.sender.Init()
 					go _peer.sender.Send()
-					<-_peer.sender.ReadyChan
 					fmt.Println("Done")
 				}
 
@@ -272,8 +272,8 @@ func initElevator() node {
 
 	elevator := newElevator(id, name, IP, newElevatorState(0))
 
+	elevator.listener.Init()
 	go elevator.listener.Listen()
-	<-elevator.listener.ReadyChan
 
 	fmt.Println("Successfully created new elevator: ")
 	fmt.Println(elevator)
@@ -305,11 +305,11 @@ func newElevatorState(Foo int) ElevatorState {
 
 func newPeer(sender connection.Sender, state ElevatorState, id string) *peer {
 	return &peer{
-		sender:    sender,
-		state:     state,
-		id:        id,
-		lastSeen:  time.Now(),
-		connected: false,
+		sender:          sender,
+		state:           state,
+		id:              id,
+		lastSeen:        time.Now(),
+		senderConnected: false,
 	}
 }
 

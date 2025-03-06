@@ -16,42 +16,46 @@ import (
 // Custom config for improved handling of packet loss
 
 type Sender struct {
-	Addr      net.UDPAddr
-	id        string
-	DataChan  chan interface{}
-	QuitChan  chan int
-	ReadyChan chan int
+	stream   quic.SendStream
+	conn     quic.Connection
+	id       string
+	Addr     net.UDPAddr
+	DataChan chan interface{}
+	QuitChan chan int
 }
 
-func (s *Sender) Send() {
+func (s *Sender) Init() {
+	// TODO: ensure that communication between computers actually works (Critical!)
 	// This is copied from https://github.com/quic-go/quic-go/blob/master/example/echo/echo.go
 	tlsConf := &tls.Config{
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"foo"},
 	}
-	// TODO: CLEAN.UP.
 
 	conn, err := quic.DialAddr(context.Background(), s.Addr.String(), tlsConf, &quicConfig)
 
 	if err != nil {
 		log.Fatal("Error when setting up QUIC connection:", err)
 	}
-	defer conn.CloseWithError(applicationError, "Application error")
+	s.conn = conn
 
 	stream, err := s.makeStream(conn)
 	if err != nil {
 		log.Fatal("Error when making stream:", err)
 	}
 
+	s.stream = stream
 	fmt.Printf("---- SENDER %s--->%s CONNECTED ----\n", conn.LocalAddr(), conn.RemoteAddr())
-	s.ReadyChan <- 1
+}
 
-	// Problem: We get the permission denied error message
+func (s *Sender) Send() {
+	defer s.stream.Close()
+	defer s.conn.CloseWithError(applicationError, "Application error")
 	for {
 		select {
 		case <-s.QuitChan:
 			fmt.Printf("Closing Send connection to %s...\n", &s.Addr)
-			stream.Close()
+			s.stream.Close()
 			return
 		case data := <-s.DataChan:
 			fmt.Println("Sending data to ", s.Addr.String())
@@ -71,7 +75,7 @@ func (s *Sender) Send() {
 				continue
 			}
 
-			_, err = stream.Write(jsonData)
+			_, err = s.stream.Write(jsonData)
 			if err != nil {
 				fmt.Println("Could not send data over stream")
 				fmt.Println(err)
@@ -90,16 +94,16 @@ func (s *Sender) makeStream(conn quic.Connection) (quic.SendStream, error) {
 	if err != nil {
 		return stream, err
 	}
+	// fmt.Println("My id is", s.id)
 	stream.Write([]byte(fmt.Sprintf("%s%s", InitMessage, s.id))) // Replace with id message
 	return stream, nil
 }
 
 func NewSender(addr net.UDPAddr, id string) Sender {
 	return Sender{
-		id:        id,
-		Addr:      addr,
-		DataChan:  make(chan interface{}),
-		QuitChan:  make(chan int, 1),
-		ReadyChan: make(chan int),
+		id:       id,
+		Addr:     addr,
+		DataChan: make(chan interface{}),
+		QuitChan: make(chan int, 1),
 	}
 }

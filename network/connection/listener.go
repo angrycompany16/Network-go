@@ -8,40 +8,42 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
 )
 
 const (
-	bufSize = 1024
+	bufSize     = 1024
+	readTimeout = time.Millisecond * 1000
 )
 
 type Listener struct {
-	Addr           net.UDPAddr
-	ReadyChan      chan int
-	QuitChan       chan string
-	DataChan       chan Message
-	ConnectionChan chan net.Addr
+	listener      *quic.Listener
+	Addr          net.UDPAddr
+	QuitChan      chan string
+	DataChan      chan Message
+	LostPeers     map[string]bool
+	LostPeersLock *sync.Mutex
 }
 
-func (l *Listener) Listen() {
+func (l *Listener) Init() {
 	listenConfig := quicConfig
 	listenConfig.KeepAlivePeriod = time.Second * 5
 	listener, err := quic.ListenAddr(l.Addr.String(), generateTLSConfig(), &listenConfig)
 	if err != nil {
 		log.Fatal("Encountered error when setting up listener:", err)
 	}
-	defer listener.Close()
-
+	l.listener = listener
 	fmt.Println("Listener ready on port", l.Addr.Port)
-	l.ReadyChan <- 1
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func (l *Listener) Listen() {
+	defer l.listener.Close()
 
 	for {
-		conn, err := listener.Accept(ctx)
+		conn, err := l.listener.Accept(context.Background())
 		if err != nil {
 			fmt.Println("Error when accepting connection from", conn.RemoteAddr())
 			fmt.Println("Failed to accept connection:", err)
@@ -54,30 +56,24 @@ func (l *Listener) Listen() {
 }
 
 func (l *Listener) handleConnection(conn quic.Connection) {
-	var id string
-	shouldQuit := false
+	var connectionId string // ID of the peer that is sending data to this connection
 	stream, err := conn.AcceptUniStream(context.Background())
 	if err != nil {
-		log.Fatal("Error when opening data stream from:", conn.RemoteAddr())
+		fmt.Println("Could not open data stream from:", conn.RemoteAddr())
+		log.Fatal("Error:", err)
 	}
 
 	buffer := make([]byte, bufSize)
 
-	// TODO: Would be nice to find a way to rewrite this
-	go func() {
-		for _id := range l.QuitChan {
-			if _id == id {
-				shouldQuit = true
-			}
-		}
-	}()
-
 	for {
-		if shouldQuit {
-			fmt.Println("Closing connection from", conn.RemoteAddr())
+		if l.LostPeers[connectionId] {
+			fmt.Println("Closing listener connection from", conn.RemoteAddr())
+			// NOTE: This may actually need a lock or something for protection as it is a shared variable
+			l.LostPeers[connectionId] = false
 			return
 		}
-		stream.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+		stream.SetReadDeadline(time.Now().Add(readTimeout))
 		n, err := stream.Read(buffer)
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
@@ -86,7 +82,9 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 
 			// TODO: handle other kind of timeout as well
 			if ierr, ok := err.(*quic.ApplicationError); ok {
-				log.Fatal("Application error encountered:", ierr)
+				fmt.Println(`Application error encountered, probably an error on the 
+					sender side:`, ierr)
+				return
 			}
 
 			fmt.Println("Failed to read from stream from", conn.RemoteAddr())
@@ -95,24 +93,35 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 		}
 
 		if string(buffer[0:len(InitMessage)]) == InitMessage {
-			id = string(buffer[len(InitMessage):n])
+			connectionId = string(buffer[len(InitMessage):n])
+			// TODO: Not beautiful... but it seems to avoid the simultaneous read and write problem
+			time.Sleep(readTimeout * 2)
+			// Wait for the connection from this peer to be removed if it exists
+			// for {
+			// 	if !l.LostPeers[connectionId] {
+			// 		break
+			// 	}
+			// }
+
 			continue
 		}
 		var result Message
 		err = json.Unmarshal(buffer[0:n], &result)
 		if err != nil {
 			fmt.Println("Error when unmarshaling network message")
+			continue
 		}
 
 		l.DataChan <- result
 	}
 }
 
-func NewListener(addr net.UDPAddr) Listener {
-	return Listener{
-		Addr:      addr,
-		ReadyChan: make(chan int),
-		QuitChan:  make(chan string),
-		DataChan:  make(chan Message),
+func NewListener(addr net.UDPAddr) *Listener {
+	return &Listener{
+		LostPeersLock: &sync.Mutex{},
+		LostPeers:     make(map[string]bool),
+		Addr:          addr,
+		QuitChan:      make(chan string, 1),
+		DataChan:      make(chan Message),
 	}
 }
