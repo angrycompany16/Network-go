@@ -18,7 +18,6 @@ import (
 type Sender struct {
 	Addr      net.UDPAddr
 	id        string
-	Connected bool
 	DataChan  chan interface{}
 	QuitChan  chan int
 	ReadyChan chan int
@@ -99,7 +98,6 @@ func NewSender(addr net.UDPAddr, id string) Sender {
 	return Sender{
 		id:        id,
 		Addr:      addr,
-		Connected: false,
 		DataChan:  make(chan interface{}),
 		QuitChan:  make(chan int, 1),
 		ReadyChan: make(chan int),

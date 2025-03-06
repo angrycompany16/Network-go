@@ -40,6 +40,7 @@ var (
 	timeout = time.Second * 5
 )
 
+// Note that all members must be public
 type LifeSignal struct {
 	ListenerAddr net.UDPAddr
 	SenderId     string
@@ -63,10 +64,11 @@ type node struct {
 }
 
 type peer struct {
-	Sender   connection.Sender
-	state    ElevatorState
-	id       string
-	lastSeen time.Time
+	sender    connection.Sender
+	state     ElevatorState
+	id        string
+	lastSeen  time.Time
+	connected bool
 }
 
 type ElevatorState struct {
@@ -132,7 +134,7 @@ func (n *node) HandleDebugInput() bool {
 
 		for _, peer := range n.peers {
 			msg := n.newMsg(n.state.Foo)
-			peer.Sender.DataChan <- msg
+			peer.sender.DataChan <- msg
 		}
 	}
 	n.peersLock.Unlock()
@@ -150,7 +152,7 @@ func (n *node) timeout() {
 		for i, peer := range n.peers {
 			if peer.lastSeen.Add(timeout).Before(time.Now()) {
 				fmt.Println("Removing peer:", peer)
-				peer.Sender.QuitChan <- 1
+				peer.sender.QuitChan <- 1
 				n.listener.QuitChan <- peer.id
 				n.peers[i] = n.peers[len(n.peers)-1]
 				n.peers = n.peers[:len(n.peers)-1]
@@ -208,20 +210,18 @@ LifeSignals:
 				// I think QUIC might be the best thing to have graced the earth with its
 				// existence
 				// We want to connect that boy
-				// Check if sender port matches peer
-				if !_peer.Sender.Connected {
-					go _peer.Sender.Send()
-					<-_peer.Sender.ReadyChan
-					_peer.Sender.Connected = true
+				if !_peer.connected {
+					go _peer.sender.Send()
+					<-_peer.sender.ReadyChan
+					_peer.connected = true
 				}
 
-				// Are we sending to the wrong channel?
-				if _peer.Sender.Addr.Port != lifeSignal.ListenerAddr.Port {
-					fmt.Printf("Sending to port %d, but peer is listening on port %d\n", _peer.Sender.Addr.Port, lifeSignal.ListenerAddr.Port)
-					_peer.Sender.QuitChan <- 1
-					_peer.Sender.Addr.Port = lifeSignal.ListenerAddr.Port
-					go _peer.Sender.Send()
-					<-_peer.Sender.ReadyChan
+				if _peer.sender.Addr.Port != lifeSignal.ListenerAddr.Port {
+					fmt.Printf("Sending to port %d, but peer is listening on port %d\n", _peer.sender.Addr.Port, lifeSignal.ListenerAddr.Port)
+					_peer.sender.QuitChan <- 1
+					_peer.sender.Addr.Port = lifeSignal.ListenerAddr.Port
+					go _peer.sender.Send()
+					<-_peer.sender.ReadyChan
 					fmt.Println("Done")
 				}
 
@@ -305,10 +305,11 @@ func newElevatorState(Foo int) ElevatorState {
 
 func newPeer(sender connection.Sender, state ElevatorState, id string) *peer {
 	return &peer{
-		Sender:   sender,
-		state:    state,
-		id:       id,
-		lastSeen: time.Now(),
+		sender:    sender,
+		state:     state,
+		id:        id,
+		lastSeen:  time.Now(),
+		connected: false,
 	}
 }
 
@@ -318,5 +319,5 @@ func (e node) String() string {
 }
 
 func (p peer) String() string {
-	return fmt.Sprintf("------- Peer ----\n ~ id: %s\n ~ sends to: %s\n", p.id, &p.Sender.Addr)
+	return fmt.Sprintf("------- Peer ----\n ~ id: %s\n ~ sends to: %s\n", p.id, &p.sender.Addr)
 }
