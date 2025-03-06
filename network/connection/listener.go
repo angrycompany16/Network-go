@@ -8,7 +8,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"sync"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
@@ -20,12 +19,11 @@ const (
 )
 
 type Listener struct {
-	listener      *quic.Listener
-	Addr          net.UDPAddr
-	QuitChan      chan string
-	DataChan      chan Message
-	LostPeers     map[string]bool
-	LostPeersLock *sync.Mutex
+	listener *quic.Listener
+	// lostPeersLock *sync.Mutex
+	Addr      net.UDPAddr
+	DataChan  chan Message
+	LostPeers map[string]bool
 }
 
 func (l *Listener) Init() {
@@ -118,10 +116,9 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 
 func NewListener(addr net.UDPAddr) *Listener {
 	return &Listener{
-		LostPeersLock: &sync.Mutex{},
-		LostPeers:     make(map[string]bool),
-		Addr:          addr,
-		QuitChan:      make(chan string, 1),
-		DataChan:      make(chan Message),
+		// lostPeersLock: &sync.Mutex{},
+		LostPeers: make(map[string]bool),
+		Addr:      addr,
+		DataChan:  make(chan Message),
 	}
 }
