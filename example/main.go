@@ -31,9 +31,7 @@ import (
 // this? One way is to use a mutex which locks the resource, however we can also
 // set up a server pattern that allows
 
-// TODO: Rewrite without using mutexes all the time?
-
-// We are gonna rewrite with select
+// TODO: Split into several files for readability maybe
 
 const (
 	stateBroadcastPort = 36251 // Akkordrekke
@@ -44,49 +42,58 @@ var (
 )
 
 // Note that all members must be public
-type LifeSignal struct {
+type Heartbeat struct {
 	ListenerAddr net.UDPAddr
 	SenderId     string
-	State        ElevatorState
-	WorldView    []ElevatorState
+	State        State
+	WorldView    []State
 }
 
-type ElevatorMsg struct {
+type Msg struct {
 	SenderId string
 	Data     int
 }
 
 type node struct {
-	id              string
-	name            string
-	state           ElevatorState
-	ip              net.IP
-	requestListener *connection.Listener
-	peers           map[string]*peer
-	lifesignalChan  chan LifeSignal // Thread communication channel
-	keyEventChan    <-chan keyboard.KeyEvent
+	id            string
+	name          string
+	state         State
+	ip            net.IP
+	listener      *connection.Listener
+	peers         map[string]*peer
+	heartbeatChan chan Heartbeat
+	keyEventChan  <-chan keyboard.KeyEvent
 }
 
 type peer struct {
 	sender    connection.Sender
-	state     ElevatorState
+	state     State
 	id        string
 	lastSeen  time.Time
 	connected bool
 }
 
-type ElevatorState struct {
+type State struct {
 	Foo  int
 	Busy bool
 }
 
+// (Almost) all threads are spawned in main!
+// The only thread that doesn't spawn in main is the connection thread
+// This obviouslt cannot be done as we need to spawn sender threads every time someone
+// connects.
 func main() {
-	elevator := initElevator()
+	nodeInstance := initNode()
 
-	elevator.lifesignalChan = make(chan LifeSignal)
+	go broadcast.BroadcastSender(stateBroadcastPort, nodeInstance.heartbeatChan)
+	go broadcast.BroadcastReceiver(stateBroadcastPort, nodeInstance.heartbeatChan)
 
+	nodeInstance.listener.Init()
+	go nodeInstance.listener.Listen()
+
+	// -- KEYBOARD INPUT
 	var err error
-	elevator.keyEventChan, err = keyboard.GetKeys(10)
+	nodeInstance.keyEventChan, err = keyboard.GetKeys(10)
 	if err != nil {
 		panic(err)
 	}
@@ -95,29 +102,113 @@ func main() {
 		fmt.Println("Exiting function")
 	}()
 
-	go broadcast.BroadcastSender(stateBroadcastPort, elevator.lifesignalChan)
-	go broadcast.BroadcastReceiver(stateBroadcastPort, elevator.lifesignalChan)
-
-	// Literally the only thread we need...
-	// When you're a total fucking moron :^)
 	for {
-		if elevator.readLifeSignals() {
-			fmt.Println("Exit2")
+		if nodeInstance.update() {
 			break
 		}
 	}
 }
 
-// Problem: If i am reading the variable (sendLifeSignal) concurrently while writing
-// to it (readLifeSignals, updates the peers variable and such), I get a race condition.
+func (n *node) ConnectPeer(_peer *peer, lifeSignal Heartbeat) {
+	_peer.sender.Addr = lifeSignal.ListenerAddr
+	_peer.sender.Init()
+	go _peer.sender.Send()
+	_peer.connected = true
+}
 
-// Even worse, in the main function of the actual elevator program I will need to receive
-// changes to the actual elevator state (backed up cab calls) in the readLifeSignals
-// function.
+func (n *node) handleHeartbeat(heartbeat Heartbeat) {
+	if n.id == heartbeat.SenderId {
+		return
+	}
 
-func (n *node) makeLifeSignal() LifeSignal {
-	signal := LifeSignal{
-		ListenerAddr: n.requestListener.Addr,
+	_peer, ok := n.peers[heartbeat.SenderId]
+	if ok {
+		_peer.lastSeen = time.Now()
+		_peer.state = heartbeat.State
+
+		// I think QUIC might be the best thing to have graced the earth with its
+		// existence
+		// We want to connect that boy
+		if !_peer.connected {
+			n.ConnectPeer(_peer, heartbeat)
+			return
+		}
+
+		if _peer.sender.Addr.Port != heartbeat.ListenerAddr.Port {
+			fmt.Printf("Sending to port %d, but peer is listening on port %d\n", _peer.sender.Addr.Port, heartbeat.ListenerAddr.Port)
+			_peer.sender.QuitChan <- 1
+			n.ConnectPeer(_peer, heartbeat)
+		}
+
+		return
+	}
+
+	sender := connection.NewSender(heartbeat.ListenerAddr, n.id)
+
+	newPeer := newPeer(sender, heartbeat.State, heartbeat.SenderId)
+
+	n.peers[heartbeat.SenderId] = newPeer
+	fmt.Println("New peer added: ")
+	fmt.Println(newPeer)
+}
+
+func (n *node) handleMessage(_msg connection.Message) {
+	var message connection.Message
+	mapstructure.Decode(_msg, &message)
+
+	var msg Msg
+	err := mapstructure.Decode(message.Data, &msg)
+
+	if err != nil {
+		log.Fatal("Could not decode elevator request:", err)
+	}
+
+	fmt.Printf("Received data %d from elevator %s\n", msg.Data, msg.SenderId)
+}
+
+func (n *node) handleKeyInput(keyEvent keyboard.KeyEvent) bool {
+	if keyEvent.Rune == 'A' || keyEvent.Rune == 'a' {
+		n.state.Foo++
+		fmt.Println("Value foo update: ", n.state.Foo)
+	}
+
+	if keyEvent.Rune == 'S' || keyEvent.Rune == 's' {
+		for id, peer := range n.peers {
+			if !peer.connected {
+				return false
+			}
+			fmt.Println()
+			fmt.Println("-------------------------------")
+			fmt.Printf("Peer %s: %#v\n", id, peer)
+			fmt.Println("-------------------------------")
+		}
+	}
+
+	if keyEvent.Rune == 'B' || keyEvent.Rune == 'b' {
+		n.state.Busy = !n.state.Busy
+		fmt.Println("Busy updated to: ", n.state.Busy)
+	}
+
+	if keyEvent.Rune == 'C' || keyEvent.Rune == 'c' {
+		for _, peer := range n.peers {
+			if !peer.connected {
+				return false
+			}
+			msg := connection.NewMessage(n.state.Foo)
+			peer.sender.DataChan <- msg
+		}
+	}
+
+	if keyEvent.Key == keyboard.KeyCtrlC {
+		fmt.Println("Exit")
+		return true
+	}
+	return false
+}
+
+func (n *node) sendHeartbeat() {
+	signal := Heartbeat{
+		ListenerAddr: n.listener.Addr,
 		SenderId:     n.id,
 		State:        n.state,
 	}
@@ -126,135 +217,38 @@ func (n *node) makeLifeSignal() LifeSignal {
 		signal.WorldView = append(signal.WorldView, peer.state)
 	}
 
-	return signal
+	n.heartbeatChan <- signal
 }
 
-func (n *node) readLifeSignals() bool {
+func (n *node) checkLostPeers() {
+	for _, peer := range n.peers {
+		if peer.lastSeen.Add(timeout).Before(time.Now()) && peer.connected {
+			fmt.Println("Lost peer:", peer)
+			peer.connected = false
+			peer.sender.QuitChan <- 1
+
+			n.listener.LostPeersChan <- peer.id
+		}
+	}
+}
+
+func (n *node) update() bool {
 	select {
-	case lifeSignal := <-n.lifesignalChan:
-		if n.id == lifeSignal.SenderId {
-			return false
-		}
-
-		_peer, ok := n.peers[lifeSignal.SenderId]
-		if ok {
-			_peer.lastSeen = time.Now()
-			_peer.state = lifeSignal.State
-
-			// I think QUIC might be the best thing to have graced the earth with its
-			// existence
-			// We want to connect that boy
-			if !_peer.connected {
-				n.ConnectPeer(_peer, lifeSignal)
-				return false
-			}
-
-			if _peer.sender.Addr.Port != lifeSignal.ListenerAddr.Port {
-				fmt.Printf("Sending to port %d, but peer is listening on port %d\n", _peer.sender.Addr.Port, lifeSignal.ListenerAddr.Port)
-				_peer.sender.QuitChan <- 1
-				n.ConnectPeer(_peer, lifeSignal)
-			}
-
-			return false
-		}
-
-		sender := connection.NewSender(lifeSignal.ListenerAddr, n.id)
-
-		newPeer := newPeer(sender, lifeSignal.State, lifeSignal.SenderId)
-
-		n.peers[lifeSignal.SenderId] = newPeer
-		fmt.Println("New peer added: ")
-		fmt.Println(newPeer)
-	case _msg := <-n.requestListener.DataChan:
-		var message connection.Message
-		mapstructure.Decode(_msg, &message)
-
-		var msg ElevatorMsg
-		err := mapstructure.Decode(message.Data, &msg)
-
-		if err != nil {
-			log.Fatal("Could not decode elevator request:", err)
-		}
-
-		fmt.Printf("Received data %d from elevator %s\n", msg.Data, msg.SenderId)
+	case heartbeat := <-n.heartbeatChan:
+		n.handleHeartbeat(heartbeat)
+	case _msg := <-n.listener.DataChan:
+		n.handleMessage(_msg)
 	case keyEvent := <-n.keyEventChan:
-		if keyEvent.Rune == 'A' || keyEvent.Rune == 'a' {
-			n.state.Foo++
-			fmt.Println("Value foo update: ", n.state.Foo)
-		}
-
-		if keyEvent.Rune == 'S' || keyEvent.Rune == 's' {
-			if len(n.peers) == 0 {
-				fmt.Println("No peers!")
-			}
-
-			for id, peer := range n.peers {
-				fmt.Println()
-				fmt.Println("-------------------------------")
-				fmt.Printf("Peer %s: %#v\n", id, peer)
-				fmt.Println("-------------------------------")
-			}
-		}
-
-		if keyEvent.Rune == 'B' || keyEvent.Rune == 'b' {
-			n.state.Busy = !n.state.Busy
-			fmt.Println("Busy updated to: ", n.state.Busy)
-		}
-
-		if keyEvent.Rune == 'C' || keyEvent.Rune == 'c' {
-			if len(n.peers) == 0 {
-				fmt.Println("No peers!")
-			}
-
-			for _, peer := range n.peers {
-				if !peer.connected {
-					continue
-				}
-				msg := n.newMsg(n.state.Foo)
-				peer.sender.DataChan <- msg
-			}
-		}
-
-		if keyEvent.Key == keyboard.KeyCtrlC {
-			fmt.Println("Exit")
-			return true
-		}
+		return n.handleKeyInput(keyEvent)
 	default:
-		// Send a heartbeat
-		n.lifesignalChan <- n.makeLifeSignal()
-
-		// Check for lost peers
-		for _, peer := range n.peers {
-			if peer.lastSeen.Add(timeout).Before(time.Now()) && peer.connected {
-				fmt.Println("Lost peer:", peer)
-				peer.connected = false
-				peer.sender.QuitChan <- 1
-
-				// n.requestListener.LostPeersLock.Lock()
-				n.requestListener.LostPeersChan <- peer.id
-				// n.requestListener.LostPeers[peer.id] = true
-				// n.requestListener.LostPeersLock.Unlock()
-			}
-		}
+		n.sendHeartbeat()
+		n.checkLostPeers()
 	}
 	return false
 }
 
-func (n *node) ConnectPeer(_peer *peer, lifeSignal LifeSignal) {
-	_peer.sender.Addr = lifeSignal.ListenerAddr
-	_peer.sender.Init()
-	go _peer.sender.Send()
-	_peer.connected = true
-}
-
-func (n *node) newMsg(data int) ElevatorMsg {
-	return ElevatorMsg{
-		Data:     data,
-		SenderId: n.id,
-	}
-}
-
-func initElevator() node {
+func initNode() node {
+	// -- FLAGS
 	var id, name string
 	flag.StringVar(&id, "id", "", "id of this peer")
 	flag.StringVar(&name, "name", "", "name of this peer")
@@ -267,6 +261,7 @@ func initElevator() node {
 		id = strconv.Itoa(r)
 	}
 
+	// -- LOCAL IP
 	ip, err := localip.LocalIP()
 	if err != nil {
 		log.Fatal("Could not get local IP address. Error:", err)
@@ -274,40 +269,39 @@ func initElevator() node {
 
 	IP := net.ParseIP(ip)
 
-	elevator := newElevator(id, name, IP, newElevatorState(0))
+	// -- NODE INSTANCE
+	nodeInstance := newNode(id, name, IP, newState(0))
 
-	elevator.requestListener.Init()
-	go elevator.requestListener.Listen()
-
+	// -- DONE
 	fmt.Println("Successfully created new elevator: ")
-	fmt.Println(elevator)
+	fmt.Println(nodeInstance)
 
-	return elevator
+	return nodeInstance
 }
 
-func newElevator(id string, name string, ip net.IP, state ElevatorState) node {
+func newNode(id string, name string, ip net.IP, state State) node {
 	return node{
 		id:    id,
 		name:  name,
 		state: state,
 		ip:    ip,
-		requestListener: connection.NewListener(net.UDPAddr{
+		listener: connection.NewListener(net.UDPAddr{
 			IP:   ip,
 			Port: connection.GetAvailablePort(),
 		}),
-		peers:          make(map[string]*peer),
-		lifesignalChan: make(chan LifeSignal),
+		peers:         make(map[string]*peer),
+		heartbeatChan: make(chan Heartbeat),
 	}
 }
 
-func newElevatorState(Foo int) ElevatorState {
-	return ElevatorState{
+func newState(Foo int) State {
+	return State{
 		Foo:  Foo,
 		Busy: false,
 	}
 }
 
-func newPeer(sender connection.Sender, state ElevatorState, id string) *peer {
+func newPeer(sender connection.Sender, state State, id string) *peer {
 	return &peer{
 		sender:    sender,
 		state:     state,
@@ -319,7 +313,7 @@ func newPeer(sender connection.Sender, state ElevatorState, id string) *peer {
 
 func (e node) String() string {
 	return fmt.Sprintf("------- Elevator %s----\n ~ id: %s\n ~ listening on: %s",
-		e.name, e.id, &e.requestListener.Addr)
+		e.name, e.id, &e.listener.Addr)
 }
 
 func (p peer) String() string {

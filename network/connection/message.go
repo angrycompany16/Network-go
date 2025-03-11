@@ -8,7 +8,7 @@ type Message struct {
 	Data     interface{} `json:"Data"`
 }
 
-func newMessage(data any) Message {
+func NewMessage(data any) Message {
 	return Message{
 		TypeName: reflect.TypeOf(data).Name(),
 		Data:     data,

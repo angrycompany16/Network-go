@@ -58,7 +58,7 @@ func (s *Sender) Send() {
 		case data := <-s.DataChan:
 			fmt.Println("Sending data to ", s.Addr.String())
 
-			jsonData, err := json.Marshal(newMessage(data))
+			jsonData, err := json.Marshal(NewMessage(data))
 			if err != nil {
 				fmt.Println("Could not marshal data:", data)
 				fmt.Println("Error:", err)
