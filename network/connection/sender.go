@@ -13,8 +13,6 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
-// Custom config for improved handling of packet loss
-
 type Sender struct {
 	stream   quic.SendStream
 	conn     quic.Connection
@@ -94,8 +92,7 @@ func (s *Sender) makeStream(conn quic.Connection) (quic.SendStream, error) {
 	if err != nil {
 		return stream, err
 	}
-	// fmt.Println("My id is", s.id)
-	stream.Write([]byte(fmt.Sprintf("%s%s", InitMessage, s.id))) // Replace with id message
+	stream.Write([]byte(fmt.Sprintf("%s%s", InitMessage, s.id)))
 	return stream, nil
 }
 

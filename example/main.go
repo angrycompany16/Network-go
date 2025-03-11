@@ -28,8 +28,9 @@ import (
 // and
 // sudo sysctl -w net.core.wmem_max=7500000
 
-// TODO: Figure out why the third elevator always takes a lot longer to connect
-// Potentially a UDP issue?
+// Problem: We want to read and write to / from the peers map all the time. How can we do
+// this? One way is to use a mutex which locks the resource, however we can also
+// set up a server pattern that allows
 
 const (
 	stateBroadcastPort = 36251 // Akkordrekke
@@ -53,21 +54,21 @@ type ElevatorMsg struct {
 }
 
 type node struct {
-	id        string
-	name      string
-	state     ElevatorState
-	ip        net.IP
-	listener  *connection.Listener
-	peers     []*peer
-	peersLock *sync.Mutex
+	id              string
+	name            string
+	state           ElevatorState
+	ip              net.IP
+	requestListener *connection.Listener
+	peers           map[string]*peer
+	peersLock       *sync.Mutex
 }
 
 type peer struct {
-	sender          connection.Sender
-	state           ElevatorState
-	id              string
-	lastSeen        time.Time
-	senderConnected bool
+	sender    connection.Sender
+	state     ElevatorState
+	id        string
+	lastSeen  time.Time
+	connected bool
 }
 
 type ElevatorState struct {
@@ -112,10 +113,10 @@ func (n *node) HandleDebugInput() bool {
 			fmt.Println("No peers!")
 		}
 
-		for i, peer := range n.peers {
+		for id, peer := range n.peers {
 			fmt.Println()
 			fmt.Println("-------------------------------")
-			fmt.Printf("Peer %d: %#v\n", i, peer)
+			fmt.Printf("Peer %s: %#v\n", id, peer)
 			fmt.Println("-------------------------------")
 		}
 	}
@@ -132,6 +133,9 @@ func (n *node) HandleDebugInput() bool {
 		}
 
 		for _, peer := range n.peers {
+			if !peer.connected {
+				continue
+			}
 			msg := n.newMsg(n.state.Foo)
 			peer.sender.DataChan <- msg
 		}
@@ -148,13 +152,15 @@ func (n *node) HandleDebugInput() bool {
 func (n *node) timeout() {
 	for {
 		n.peersLock.Lock()
-		for i, peer := range n.peers {
-			if peer.lastSeen.Add(timeout).Before(time.Now()) {
-				fmt.Println("Removing peer\n", peer)
+		for _, peer := range n.peers {
+			if peer.lastSeen.Add(timeout).Before(time.Now()) && peer.connected {
+				fmt.Println("Lost peer:", peer)
+				peer.connected = false
 				peer.sender.QuitChan <- 1
-				n.listener.LostPeers[peer.id] = true
-				n.peers[i] = n.peers[len(n.peers)-1]
-				n.peers = n.peers[:len(n.peers)-1]
+
+				n.requestListener.LostPeersLock.Lock()
+				n.requestListener.LostPeers[peer.id] = true
+				n.requestListener.LostPeersLock.Unlock()
 			}
 		}
 		n.peersLock.Unlock()
@@ -162,7 +168,7 @@ func (n *node) timeout() {
 }
 
 func (n *node) readPeerMsgs() {
-	for msg := range n.listener.DataChan {
+	for msg := range n.requestListener.DataChan {
 		var message connection.Message
 		mapstructure.Decode(msg, &message)
 
@@ -180,14 +186,16 @@ func (n *node) readPeerMsgs() {
 func (n *node) sendLifeSignal(signalChan chan (LifeSignal)) {
 	for {
 		signal := LifeSignal{
-			ListenerAddr: n.listener.Addr,
+			ListenerAddr: n.requestListener.Addr,
 			SenderId:     n.id,
 			State:        n.state,
 		}
 
+		n.peersLock.Lock()
 		for _, peer := range n.peers {
 			signal.WorldView = append(signal.WorldView, peer.state)
 		}
+		n.peersLock.Unlock()
 
 		signalChan <- signal
 		time.Sleep(time.Millisecond * 10)
@@ -202,45 +210,48 @@ LifeSignals:
 		}
 
 		n.peersLock.Lock()
-		for _, _peer := range n.peers {
-			if _peer.id == lifeSignal.SenderId {
-				_peer.lastSeen = time.Now()
-				_peer.state = lifeSignal.State
-				// I think QUIC might be the best thing to have graced the earth with its
-				// existence
-				// We want to connect that boy
+		_peer, ok := n.peers[lifeSignal.SenderId]
+		if ok {
+			_peer.lastSeen = time.Now()
+			_peer.state = lifeSignal.State
 
-				if !_peer.senderConnected {
-					_peer.sender.Init()
-					go _peer.sender.Send()
-					_peer.senderConnected = true
-				}
-
-				if _peer.sender.Addr.Port != lifeSignal.ListenerAddr.Port {
-					fmt.Printf("Sending to port %d, but peer is listening on port %d\n", _peer.sender.Addr.Port, lifeSignal.ListenerAddr.Port)
-					_peer.sender.QuitChan <- 1
-					_peer.sender.Addr.Port = lifeSignal.ListenerAddr.Port
-					_peer.sender.Init()
-					go _peer.sender.Send()
-					fmt.Println("Done")
-				}
-
+			// I think QUIC might be the best thing to have graced the earth with its
+			// existence
+			// We want to connect that boy
+			if !_peer.connected {
+				n.ConnectPeer(_peer, lifeSignal)
 				n.peersLock.Unlock()
-
-				continue LifeSignals
+				continue
 			}
+
+			if _peer.sender.Addr.Port != lifeSignal.ListenerAddr.Port {
+				fmt.Printf("Sending to port %d, but peer is listening on port %d\n", _peer.sender.Addr.Port, lifeSignal.ListenerAddr.Port)
+				_peer.sender.QuitChan <- 1
+				n.ConnectPeer(_peer, lifeSignal)
+			}
+
+			n.peersLock.Unlock()
+
+			continue LifeSignals
 		}
 
 		sender := connection.NewSender(lifeSignal.ListenerAddr, n.id)
 
 		newPeer := newPeer(sender, lifeSignal.State, lifeSignal.SenderId)
 
-		n.peers = append(n.peers, newPeer)
+		n.peers[lifeSignal.SenderId] = newPeer
 		fmt.Println("New peer added: ")
 		fmt.Println(newPeer)
 
 		n.peersLock.Unlock()
 	}
+}
+
+func (n *node) ConnectPeer(_peer *peer, lifeSignal LifeSignal) {
+	_peer.sender.Addr = lifeSignal.ListenerAddr
+	_peer.sender.Init()
+	go _peer.sender.Send()
+	_peer.connected = true
 }
 
 func (n *node) newMsg(data int) ElevatorMsg {
@@ -272,8 +283,8 @@ func initElevator() node {
 
 	elevator := newElevator(id, name, IP, newElevatorState(0))
 
-	elevator.listener.Init()
-	go elevator.listener.Listen()
+	elevator.requestListener.Init()
+	go elevator.requestListener.Listen()
 
 	fmt.Println("Successfully created new elevator: ")
 	fmt.Println(elevator)
@@ -287,11 +298,11 @@ func newElevator(id string, name string, ip net.IP, state ElevatorState) node {
 		name:  name,
 		state: state,
 		ip:    ip,
-		listener: connection.NewListener(net.UDPAddr{
+		requestListener: connection.NewListener(net.UDPAddr{
 			IP:   ip,
 			Port: connection.GetAvailablePort(),
 		}),
-		peers:     make([]*peer, 0),
+		peers:     make(map[string]*peer),
 		peersLock: &sync.Mutex{},
 	}
 }
@@ -305,17 +316,17 @@ func newElevatorState(Foo int) ElevatorState {
 
 func newPeer(sender connection.Sender, state ElevatorState, id string) *peer {
 	return &peer{
-		sender:          sender,
-		state:           state,
-		id:              id,
-		lastSeen:        time.Now(),
-		senderConnected: false,
+		sender:    sender,
+		state:     state,
+		id:        id,
+		lastSeen:  time.Now(),
+		connected: false,
 	}
 }
 
 func (e node) String() string {
 	return fmt.Sprintf("------- Elevator %s----\n ~ id: %s\n ~ listening on: %s",
-		e.name, e.id, &e.listener.Addr)
+		e.name, e.id, &e.requestListener.Addr)
 }
 
 func (p peer) String() string {

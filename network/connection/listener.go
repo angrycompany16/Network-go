@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
@@ -19,11 +20,11 @@ const (
 )
 
 type Listener struct {
-	listener *quic.Listener
-	// lostPeersLock *sync.Mutex
-	Addr      net.UDPAddr
-	DataChan  chan Message
-	LostPeers map[string]bool
+	listener      *quic.Listener
+	LostPeersLock *sync.Mutex
+	Addr          net.UDPAddr
+	DataChan      chan Message
+	LostPeers     map[string]bool
 }
 
 func (l *Listener) Init() {
@@ -64,12 +65,14 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 	buffer := make([]byte, bufSize)
 
 	for {
+		l.LostPeersLock.Lock()
 		if l.LostPeers[connectionId] {
 			fmt.Println("Closing listener connection from", conn.RemoteAddr())
-			// NOTE: This may actually need a lock or something for protection as it is a shared variable
 			l.LostPeers[connectionId] = false
+			l.LostPeersLock.Unlock()
 			return
 		}
+		l.LostPeersLock.Unlock()
 
 		stream.SetReadDeadline(time.Now().Add(readTimeout))
 		n, err := stream.Read(buffer)
@@ -87,20 +90,12 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 
 			fmt.Println("Failed to read from stream from", conn.RemoteAddr())
 			fmt.Println(err)
+			// TODO: Close if error is timeout: no recent network activity?
 			continue
 		}
 
 		if string(buffer[0:len(InitMessage)]) == InitMessage {
 			connectionId = string(buffer[len(InitMessage):n])
-			// TODO: Not beautiful... but it seems to avoid the simultaneous read and write problem
-			time.Sleep(readTimeout * 2)
-			// Wait for the connection from this peer to be removed if it exists
-			// for {
-			// 	if !l.LostPeers[connectionId] {
-			// 		break
-			// 	}
-			// }
-
 			continue
 		}
 		var result Message
@@ -116,9 +111,9 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 
 func NewListener(addr net.UDPAddr) *Listener {
 	return &Listener{
-		// lostPeersLock: &sync.Mutex{},
-		LostPeers: make(map[string]bool),
-		Addr:      addr,
-		DataChan:  make(chan Message),
+		LostPeersLock: &sync.Mutex{},
+		LostPeers:     make(map[string]bool),
+		Addr:          addr,
+		DataChan:      make(chan Message),
 	}
 }
