@@ -42,7 +42,6 @@ func BroadcastSender(port int, chans ...interface{}) {
 			continue
 		}
 		conn.WriteTo(ttj, addr)
-
 	}
 }
 

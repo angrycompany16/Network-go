@@ -7,7 +7,6 @@ import (
 	"math/rand/v2"
 	"net"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/angrycompany16/Network-go/network/broadcast"
@@ -31,6 +30,10 @@ import (
 // Problem: We want to read and write to / from the peers map all the time. How can we do
 // this? One way is to use a mutex which locks the resource, however we can also
 // set up a server pattern that allows
+
+// TODO: Rewrite without using mutexes all the time?
+
+// We are gonna rewrite with select
 
 const (
 	stateBroadcastPort = 36251 // Akkordrekke
@@ -60,7 +63,8 @@ type node struct {
 	ip              net.IP
 	requestListener *connection.Listener
 	peers           map[string]*peer
-	peersLock       *sync.Mutex
+	lifesignalChan  chan LifeSignal // Thread communication channel
+	keyEventChan    <-chan keyboard.KeyEvent
 }
 
 type peer struct {
@@ -79,137 +83,59 @@ type ElevatorState struct {
 func main() {
 	elevator := initElevator()
 
-	lifeSignalChannel := make(chan LifeSignal)
+	elevator.lifesignalChan = make(chan LifeSignal)
 
-	go broadcast.BroadcastSender(stateBroadcastPort, lifeSignalChannel)
-	go broadcast.BroadcastReceiver(stateBroadcastPort, lifeSignalChannel)
+	var err error
+	elevator.keyEventChan, err = keyboard.GetKeys(10)
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		_ = keyboard.Close()
+		fmt.Println("Exiting function")
+	}()
 
-	go elevator.timeout()
-	go elevator.sendLifeSignal(lifeSignalChannel)
-	go elevator.readLifeSignals(lifeSignalChannel)
+	go broadcast.BroadcastSender(stateBroadcastPort, elevator.lifesignalChan)
+	go broadcast.BroadcastReceiver(stateBroadcastPort, elevator.lifesignalChan)
 
-	go elevator.readPeerMsgs()
-
+	// Literally the only thread we need...
+	// When you're a total fucking moron :^)
 	for {
-		if elevator.HandleDebugInput() {
+		if elevator.readLifeSignals() {
+			fmt.Println("Exit2")
 			break
 		}
 	}
 }
 
-func (n *node) HandleDebugInput() bool {
-	char, key, err := keyboard.GetSingleKey()
-	if err != nil {
-		log.Fatal(err)
+// Problem: If i am reading the variable (sendLifeSignal) concurrently while writing
+// to it (readLifeSignals, updates the peers variable and such), I get a race condition.
+
+// Even worse, in the main function of the actual elevator program I will need to receive
+// changes to the actual elevator state (backed up cab calls) in the readLifeSignals
+// function.
+
+func (n *node) makeLifeSignal() LifeSignal {
+	signal := LifeSignal{
+		ListenerAddr: n.requestListener.Addr,
+		SenderId:     n.id,
+		State:        n.state,
 	}
 
-	if char == 'A' || char == 'a' {
-		n.state.Foo++
-		fmt.Println("Value foo update: ", n.state.Foo)
+	for _, peer := range n.peers {
+		signal.WorldView = append(signal.WorldView, peer.state)
 	}
 
-	if char == 'S' || char == 's' {
-		if len(n.peers) == 0 {
-			fmt.Println("No peers!")
-		}
-
-		for id, peer := range n.peers {
-			fmt.Println()
-			fmt.Println("-------------------------------")
-			fmt.Printf("Peer %s: %#v\n", id, peer)
-			fmt.Println("-------------------------------")
-		}
-	}
-
-	if char == 'B' || char == 'b' {
-		n.state.Busy = !n.state.Busy
-		fmt.Println("Busy updated to: ", n.state.Busy)
-	}
-
-	n.peersLock.Lock()
-	if char == 'C' || char == 'c' {
-		if len(n.peers) == 0 {
-			fmt.Println("No peers!")
-		}
-
-		for _, peer := range n.peers {
-			if !peer.connected {
-				continue
-			}
-			msg := n.newMsg(n.state.Foo)
-			peer.sender.DataChan <- msg
-		}
-	}
-	n.peersLock.Unlock()
-
-	if key == keyboard.KeyCtrlC {
-		fmt.Println("Exit")
-		return true
-	}
-	return false
+	return signal
 }
 
-func (n *node) timeout() {
-	for {
-		n.peersLock.Lock()
-		for _, peer := range n.peers {
-			if peer.lastSeen.Add(timeout).Before(time.Now()) && peer.connected {
-				fmt.Println("Lost peer:", peer)
-				peer.connected = false
-				peer.sender.QuitChan <- 1
-
-				n.requestListener.LostPeersLock.Lock()
-				n.requestListener.LostPeers[peer.id] = true
-				n.requestListener.LostPeersLock.Unlock()
-			}
-		}
-		n.peersLock.Unlock()
-	}
-}
-
-func (n *node) readPeerMsgs() {
-	for msg := range n.requestListener.DataChan {
-		var message connection.Message
-		mapstructure.Decode(msg, &message)
-
-		var msg ElevatorMsg
-		err := mapstructure.Decode(message.Data, &msg)
-
-		if err != nil {
-			log.Fatal("Could not decode elevator request:", err)
-		}
-
-		fmt.Printf("Received data %d from elevator %s\n", msg.Data, msg.SenderId)
-	}
-}
-
-func (n *node) sendLifeSignal(signalChan chan (LifeSignal)) {
-	for {
-		signal := LifeSignal{
-			ListenerAddr: n.requestListener.Addr,
-			SenderId:     n.id,
-			State:        n.state,
-		}
-
-		n.peersLock.Lock()
-		for _, peer := range n.peers {
-			signal.WorldView = append(signal.WorldView, peer.state)
-		}
-		n.peersLock.Unlock()
-
-		signalChan <- signal
-		time.Sleep(time.Millisecond * 10)
-	}
-}
-
-func (n *node) readLifeSignals(signalChan chan (LifeSignal)) {
-LifeSignals:
-	for lifeSignal := range signalChan {
+func (n *node) readLifeSignals() bool {
+	select {
+	case lifeSignal := <-n.lifesignalChan:
 		if n.id == lifeSignal.SenderId {
-			continue
+			return false
 		}
 
-		n.peersLock.Lock()
 		_peer, ok := n.peers[lifeSignal.SenderId]
 		if ok {
 			_peer.lastSeen = time.Now()
@@ -220,8 +146,7 @@ LifeSignals:
 			// We want to connect that boy
 			if !_peer.connected {
 				n.ConnectPeer(_peer, lifeSignal)
-				n.peersLock.Unlock()
-				continue
+				return false
 			}
 
 			if _peer.sender.Addr.Port != lifeSignal.ListenerAddr.Port {
@@ -230,9 +155,7 @@ LifeSignals:
 				n.ConnectPeer(_peer, lifeSignal)
 			}
 
-			n.peersLock.Unlock()
-
-			continue LifeSignals
+			return false
 		}
 
 		sender := connection.NewSender(lifeSignal.ListenerAddr, n.id)
@@ -242,9 +165,79 @@ LifeSignals:
 		n.peers[lifeSignal.SenderId] = newPeer
 		fmt.Println("New peer added: ")
 		fmt.Println(newPeer)
+	case _msg := <-n.requestListener.DataChan:
+		var message connection.Message
+		mapstructure.Decode(_msg, &message)
 
-		n.peersLock.Unlock()
+		var msg ElevatorMsg
+		err := mapstructure.Decode(message.Data, &msg)
+
+		if err != nil {
+			log.Fatal("Could not decode elevator request:", err)
+		}
+
+		fmt.Printf("Received data %d from elevator %s\n", msg.Data, msg.SenderId)
+	case keyEvent := <-n.keyEventChan:
+		if keyEvent.Rune == 'A' || keyEvent.Rune == 'a' {
+			n.state.Foo++
+			fmt.Println("Value foo update: ", n.state.Foo)
+		}
+
+		if keyEvent.Rune == 'S' || keyEvent.Rune == 's' {
+			if len(n.peers) == 0 {
+				fmt.Println("No peers!")
+			}
+
+			for id, peer := range n.peers {
+				fmt.Println()
+				fmt.Println("-------------------------------")
+				fmt.Printf("Peer %s: %#v\n", id, peer)
+				fmt.Println("-------------------------------")
+			}
+		}
+
+		if keyEvent.Rune == 'B' || keyEvent.Rune == 'b' {
+			n.state.Busy = !n.state.Busy
+			fmt.Println("Busy updated to: ", n.state.Busy)
+		}
+
+		if keyEvent.Rune == 'C' || keyEvent.Rune == 'c' {
+			if len(n.peers) == 0 {
+				fmt.Println("No peers!")
+			}
+
+			for _, peer := range n.peers {
+				if !peer.connected {
+					continue
+				}
+				msg := n.newMsg(n.state.Foo)
+				peer.sender.DataChan <- msg
+			}
+		}
+
+		if keyEvent.Key == keyboard.KeyCtrlC {
+			fmt.Println("Exit")
+			return true
+		}
+	default:
+		// Send a heartbeat
+		n.lifesignalChan <- n.makeLifeSignal()
+
+		// Check for lost peers
+		for _, peer := range n.peers {
+			if peer.lastSeen.Add(timeout).Before(time.Now()) && peer.connected {
+				fmt.Println("Lost peer:", peer)
+				peer.connected = false
+				peer.sender.QuitChan <- 1
+
+				// n.requestListener.LostPeersLock.Lock()
+				n.requestListener.LostPeersChan <- peer.id
+				// n.requestListener.LostPeers[peer.id] = true
+				// n.requestListener.LostPeersLock.Unlock()
+			}
+		}
 	}
+	return false
 }
 
 func (n *node) ConnectPeer(_peer *peer, lifeSignal LifeSignal) {
@@ -302,8 +295,8 @@ func newElevator(id string, name string, ip net.IP, state ElevatorState) node {
 			IP:   ip,
 			Port: connection.GetAvailablePort(),
 		}),
-		peers:     make(map[string]*peer),
-		peersLock: &sync.Mutex{},
+		peers:          make(map[string]*peer),
+		lifesignalChan: make(chan LifeSignal),
 	}
 }
 

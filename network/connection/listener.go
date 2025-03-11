@@ -24,7 +24,8 @@ type Listener struct {
 	LostPeersLock *sync.Mutex
 	Addr          net.UDPAddr
 	DataChan      chan Message
-	LostPeers     map[string]bool
+	LostPeersChan chan string
+	// LostPeers     map[string]bool
 }
 
 func (l *Listener) Init() {
@@ -65,55 +66,59 @@ func (l *Listener) handleConnection(conn quic.Connection) {
 	buffer := make([]byte, bufSize)
 
 	for {
-		l.LostPeersLock.Lock()
-		if l.LostPeers[connectionId] {
-			fmt.Println("Closing listener connection from", conn.RemoteAddr())
-			l.LostPeers[connectionId] = false
-			l.LostPeersLock.Unlock()
-			return
-		}
-		l.LostPeersLock.Unlock()
+		select {
+		case lostPeer := <-l.LostPeersChan:
+			if lostPeer == connectionId {
+				fmt.Println("Closing listener connection from", conn.RemoteAddr())
+				return
+				// l.LostPeers[connectionId] = false
+				// if l.LostPeers[connectionId] {
+				// }
+			}
+		default:
+			stream.SetReadDeadline(time.Now().Add(readTimeout))
+			n, err := stream.Read(buffer)
+			if err != nil {
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					continue
+				}
 
-		stream.SetReadDeadline(time.Now().Add(readTimeout))
-		n, err := stream.Read(buffer)
-		if err != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) {
+				if ierr, ok := err.(*quic.ApplicationError); ok {
+					// TODO: Find out why we get an application error every time we close
+					// the program
+					fmt.Println(`Application error encountered, probably an error on the 
+					sender side:`, err)
+					panic(ierr)
+				}
+
+				fmt.Println("Failed to read from stream from", conn.RemoteAddr())
+				fmt.Println(err)
 				continue
 			}
 
-			// TODO: handle other kind of timeout as well
-			if ierr, ok := err.(*quic.ApplicationError); ok {
-				fmt.Println(`Application error encountered, probably an error on the 
-					sender side:`, ierr)
-				return
+			if string(buffer[0:len(InitMessage)]) == InitMessage {
+				connectionId = string(buffer[len(InitMessage):n])
+				continue
+			}
+			var result Message
+			err = json.Unmarshal(buffer[0:n], &result)
+			if err != nil {
+				fmt.Println("Error when unmarshaling network message")
+				continue
 			}
 
-			fmt.Println("Failed to read from stream from", conn.RemoteAddr())
-			fmt.Println(err)
-			// TODO: Close if error is timeout: no recent network activity?
-			continue
+			l.DataChan <- result
 		}
 
-		if string(buffer[0:len(InitMessage)]) == InitMessage {
-			connectionId = string(buffer[len(InitMessage):n])
-			continue
-		}
-		var result Message
-		err = json.Unmarshal(buffer[0:n], &result)
-		if err != nil {
-			fmt.Println("Error when unmarshaling network message")
-			continue
-		}
-
-		l.DataChan <- result
 	}
 }
 
 func NewListener(addr net.UDPAddr) *Listener {
 	return &Listener{
 		LostPeersLock: &sync.Mutex{},
-		LostPeers:     make(map[string]bool),
-		Addr:          addr,
-		DataChan:      make(chan Message),
+		LostPeersChan: make(chan string),
+		// LostPeers:     make(map[string]bool),
+		Addr:     addr,
+		DataChan: make(chan Message),
 	}
 }
