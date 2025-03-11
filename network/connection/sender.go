@@ -48,7 +48,8 @@ func (s *Sender) Init() {
 
 func (s *Sender) Send() {
 	defer s.stream.Close()
-	defer s.conn.CloseWithError(applicationError, "Application error")
+	// defer s.conn.CloseWithError()
+	// defer s.conn.CloseWithError(applicationError, "Application error")
 	for {
 		select {
 		case <-s.QuitChan:

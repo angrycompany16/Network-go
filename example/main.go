@@ -99,7 +99,6 @@ func main() {
 	}
 	defer func() {
 		_ = keyboard.Close()
-		fmt.Println("Exiting function")
 	}()
 
 	for {
@@ -192,8 +191,9 @@ func (n *node) handleKeyInput(keyEvent keyboard.KeyEvent) bool {
 	if keyEvent.Rune == 'C' || keyEvent.Rune == 'c' {
 		for _, peer := range n.peers {
 			if !peer.connected {
-				return false
+				continue
 			}
+			fmt.Println("Sending data to peer")
 			msg := connection.NewMessage(n.state.Foo)
 			peer.sender.DataChan <- msg
 		}
@@ -226,8 +226,9 @@ func (n *node) checkLostPeers() {
 			fmt.Println("Lost peer:", peer)
 			peer.connected = false
 			peer.sender.QuitChan <- 1
-
+			fmt.Println("Deleting peer")
 			n.listener.LostPeersChan <- peer.id
+			fmt.Println("Continued")
 		}
 	}
 }
