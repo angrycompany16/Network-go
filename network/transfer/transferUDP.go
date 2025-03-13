@@ -9,7 +9,7 @@ import (
 	"github.com/angrycompany16/Network-go/network/conn"
 )
 
-const bufSize = 1024
+const bufSize = 16384
 
 // Encodes received values from `chans` into type-tagged JSON, then broadcasts
 // it on `port`
