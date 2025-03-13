@@ -16,6 +16,13 @@ import (
 	"github.com/mitchellh/mapstructure"
 )
 
+// Question: Is it time to scrap the QUIC connections?
+// Instead we could: Broadcast incoming requests over UDP
+// Include the assignee in the broadcast
+// Then everything just works
+
+// Fuck.
+
 // Problem: at 90% packet loss peers time out even after five seconds
 
 // NOTE:
